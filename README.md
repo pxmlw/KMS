@@ -29,6 +29,7 @@
 
 - Python 3.8+
 - pip 或 pip3
+- **部署 Teams Bot 时需要**：Cloudflare Tunnel 或 ngrok（用于暴露本地服务到公网）
 
 ## 🚀 快速开始
 
@@ -126,8 +127,42 @@ python start_telegram_bot.py
 1. 在 Azure Portal 创建 Bot 应用注册
 2. 获取 App ID、App Password 和 Tenant ID
 3. 在管理界面"前端集成"页面配置
-4. 设置 Teams Bot 的 Messaging Endpoint 为：`https://your-domain.com/api/teams/messages`
-5. 确保 API 服务正在运行
+4. **暴露 API 服务**（使用 Cloudflare Tunnel 或 ngrok）：
+   
+   **使用 Cloudflare Tunnel（推荐）**：
+   ```bash
+   # 安装 cloudflared（如果未安装）
+   # macOS: brew install cloudflared
+   # Linux: 从 https://github.com/cloudflare/cloudflared/releases 下载
+   
+   # 创建隧道（首次使用）
+   cloudflared tunnel create kms-tunnel
+   
+   # 运行隧道（将本地8000端口暴露到公网）
+   cloudflared tunnel --url http://localhost:8000
+   ```
+   
+   运行后会显示一个公网URL，例如：`https://xxxxx.trycloudflare.com`
+   
+   **或使用 ngrok**：
+   ```bash
+   # 安装 ngrok（如果未安装）
+   # 从 https://ngrok.com/download 下载
+   
+   # 设置 authtoken（首次使用）
+   ngrok config add-authtoken YOUR_AUTHTOKEN
+   
+   # 暴露本地8000端口
+   ngrok http 8000
+   ```
+   
+   运行后会显示一个公网URL，例如：`https://xxxxx.ngrok.io`
+
+5. 设置 Teams Bot 的 Messaging Endpoint：
+   - Cloudflare Tunnel: `https://xxxxx.trycloudflare.com/api/teams/messages`
+   - ngrok: `https://xxxxx.ngrok.io/api/teams/messages`
+
+6. 确保 API 服务正在运行（`python main.py`）
 
 ### 配置 Telegram Bot
 
@@ -221,6 +256,9 @@ fastapi-webapp/
 - 检查 Azure 配置是否正确
 - 确认 Messaging Endpoint URL 可访问
 - 检查 Tenant ID 是否正确（单租户 Bot）
+- **确保 Cloudflare Tunnel 或 ngrok 正在运行**
+- 验证隧道URL是否正确配置到 Azure Bot Service
+- 检查本地 API 服务是否在运行（`http://localhost:8000`）
 
 ### 文档无法搜索
 
