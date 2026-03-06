@@ -45,7 +45,7 @@ class FrontendIntegration:
         conn = db.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT status, config_data, api_key_hash, last_tested
+            SELECT status, config_data, api_key_hash, last_tested, updated_at
             FROM frontend_integrations
             WHERE frontend_type = ?
         """, (self.frontend_type,))
@@ -60,7 +60,8 @@ class FrontendIntegration:
             "status": row["status"],
             "config": config,
             "api_key_hash": row["api_key_hash"],
-            "last_tested": row["last_tested"]
+            "last_tested": row["last_tested"],
+            "updated_at": row["updated_at"]
         }
     
     def test_connection(self) -> bool:

@@ -106,8 +106,17 @@ def frontend_integration_page():
     # 显示当前配置
     if telegram_config:
         st.info(f"✅ 当前已配置（状态: {telegram_config['status']}）")
+        config = telegram_config.get('config', {})
+        if config.get('username'):
+            st.caption(f"Bot用户名: @{config['username']}")
+        if config.get('first_name'):
+            st.caption(f"Bot名称: {config['first_name']}")
+        if config.get('id'):
+            st.caption(f"Bot ID: {config['id']}")
         if telegram_config.get('api_key_hash'):
             st.caption(f"Token哈希: ...{telegram_config['api_key_hash']}")
+        if telegram_config.get('updated_at'):
+            st.caption(f"最后更新: {telegram_config['updated_at']}")
     
     telegram_token = st.text_input(
         "Telegram Bot Token", 
@@ -118,17 +127,23 @@ def frontend_integration_page():
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("保存并连接Telegram"):
+        if st.button("保存并连接Telegram", type="primary"):
             if telegram_token:
                 try:
                     bot = create_telegram_bot(telegram_token)
                     if bot.test_connection():
-                        st.success("✅ Telegram Bot连接成功并已保存配置！")
+                        bot_info = bot.get_bot_info()
+                        if bot_info:
+                            st.success(f"✅ Telegram Bot连接成功！\nBot: @{bot_info.get('username', 'N/A')} ({bot_info.get('first_name', 'N/A')})")
+                        else:
+                            st.success("✅ Telegram Bot连接成功并已保存配置！")
                         st.rerun()  # 刷新页面显示新配置
                     else:
                         st.error("❌ 连接失败，请检查Token")
                 except Exception as e:
                     st.error(f"❌ 连接失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
             else:
                 st.warning("⚠️ 请输入Bot Token")
     
@@ -138,11 +153,17 @@ def frontend_integration_page():
                 try:
                     bot = create_telegram_bot(telegram_token)
                     if bot.test_connection():
-                        st.success("✅ 连接测试成功！")
+                        bot_info = bot.get_bot_info()
+                        if bot_info:
+                            st.success(f"✅ 连接测试成功！\nBot: @{bot_info.get('username', 'N/A')}")
+                        else:
+                            st.success("✅ 连接测试成功！")
                     else:
                         st.error("❌ 连接测试失败")
                 except Exception as e:
                     st.error(f"❌ 测试失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
             else:
                 st.warning("⚠️ 请输入Token进行测试")
     
