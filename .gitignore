@@ -1,5 +1,3 @@
-node_modules
-
 # Python
 __pycache__/
 *.py[cod]
@@ -10,9 +8,21 @@ venv/
 env/
 ENV/
 .venv
-*.egg-info/
-dist/
-build/
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+
+# 数据文件
+data/documents/*
+data/kb/*
+!data/documents/.gitkeep
+!data/kb/.gitkeep
+
+# 环境变量
+.env
+.env.local
 
 # IDE
 .vscode/
@@ -21,6 +31,19 @@ build/
 *.swo
 *~
 
+# 日志
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
 # OS
 .DS_Store
 Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# FAISS索引
+*.index
