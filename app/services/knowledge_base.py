@@ -37,8 +37,7 @@ class KnowledgeBase:
                 # 使用轻量级中文嵌入模型
                 self.embedding_model = SentenceTransformer('paraphrase-multilang-MiniLM-L12-v2')
             except Exception as e:
-                print(f"警告：无法加载嵌入模型: {e}")
-                print("将使用简化版文本匹配")
+                pass  # 将使用简化版文本匹配
     
     def add_document(self, doc_id: int, content: str, 
                       metadata: Dict, intent_space_id: Optional[int] = None):
@@ -78,6 +77,31 @@ class KnowledgeBase:
                 self._update_faiss_index(chunk, chunk_id, chunk_metadata)
         
         conn.close()
+    
+    def delete_document(self, doc_id: int):
+        """
+        从知识库删除文档
+        
+        Args:
+            doc_id: 文档ID
+        """
+        # 从内存中删除文档块
+        self.document_chunks = [
+            chunk for chunk in self.document_chunks 
+            if chunk.get("metadata", {}).get("doc_id") != doc_id
+        ]
+        
+        # 删除知识库目录中的块文件
+        import glob
+        chunk_files = list(self.kb_dir.glob(f"{doc_id}_*.json"))
+        for chunk_file in chunk_files:
+            try:
+                chunk_file.unlink()
+            except Exception:
+                pass
+        
+        # 注意：FAISS索引不支持删除单个向量，如果需要完全清理，需要重建索引
+        # 这里只删除文件，索引会在下次重启时重建
     
     def _chunk_document(self, content: str, chunk_size: int = 500) -> List[str]:
         """将文档分块"""
@@ -134,7 +158,7 @@ class KnowledgeBase:
                     "metadata": metadata
                 }, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"FAISS索引更新失败: {e}")
+            pass  # FAISS索引更新失败，忽略
     
     def _load_documents_from_db(self):
         """从数据库加载文档到知识库"""
@@ -159,7 +183,7 @@ class KnowledgeBase:
                 
                 self.add_document(doc["id"], raw_content, metadata, doc["intent_space_id"])
             except Exception as e:
-                print(f"加载文档 {doc['id']} 失败: {e}")
+                pass  # 加载文档失败，跳过
     
     def search(self, query: str, intent_space_id: Optional[int] = None, 
                 top_k: int = 5) -> List[Dict]:
@@ -239,7 +263,6 @@ class KnowledgeBase:
             
             return results
         except Exception as e:
-            print(f"FAISS搜索失败: {e}，回退到简单搜索")
             return self._simple_search(query, intent_space_id, top_k)
     
     def _simple_search(self, query: str, intent_space_id: Optional[int], top_k: int) -> List[Dict]:
@@ -311,6 +334,48 @@ class KnowledgeBase:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
     
+    async def generate_response_async(self, query: str, search_results: List[Dict], 
+                                      frontend_type: str = "api") -> str:
+        """异步版本的响应生成（优化：即使没有搜索结果也使用AI回答）"""
+        from app.config import USE_AI_RESPONSE, FAST_RESPONSE_THRESHOLD
+        
+        # 优化：即使没有搜索结果，也使用AI基于通用知识回答
+        if not search_results:
+            # 创建一个空的搜索结果，让AI知道没有知识库内容
+            empty_results = [{
+                "doc_id": 0,
+                "chunk_id": 0,
+                "content": "",
+                "metadata": {},
+                "score": 0.0
+            }]
+            try:
+                return await self._generate_ai_response_async(query, empty_results, frontend_type)
+            except Exception as e:
+                return "抱歉，未找到相关信息。请尝试使用不同的关键词或联系管理员。"
+        
+        # 检查相关性分数
+        first_score = search_results[0].get("score", 0) if search_results else 0
+        
+        # 优化：即使相关性低，也使用AI生成响应（AI可以基于低相关性结果生成合理回答）
+        # 只有在相关性极高（>0.95）且配置允许时才使用快速路径
+        use_fast_path = USE_AI_RESPONSE and first_score > FAST_RESPONSE_THRESHOLD
+        
+        if use_fast_path:
+            try:
+                return self._generate_simple_response(query, search_results[:1], frontend_type)
+            except Exception as e:
+                pass  # 快速响应生成失败，回退到AI生成
+        
+        # 主要路径：使用AI生成响应（即使相关性低，AI也能基于搜索结果生成合理回答）
+        try:
+            return await self._generate_ai_response_async(query, search_results, frontend_type)
+        except Exception as e:
+            # 如果AI失败，至少尝试用简化响应
+            if search_results:
+                return self._generate_simple_response(query, search_results, frontend_type)
+            return "抱歉，处理您的请求时出现了错误。"
+    
     def generate_response(self, query: str, search_results: List[Dict], 
                          frontend_type: str = "api") -> str:
         """
@@ -324,88 +389,269 @@ class KnowledgeBase:
         Returns:
             格式化的自然语言响应文本
         """
-        if not search_results:
-            return "抱歉，未找到相关信息。请尝试使用不同的关键词或联系管理员。"
+        from app.config import USE_AI_RESPONSE, FAST_RESPONSE_THRESHOLD
         
-        # 尝试使用AI生成响应
+        # 优化：即使没有搜索结果，也使用AI基于通用知识回答
+        if not search_results:
+            # 创建一个空的搜索结果，让AI知道没有知识库内容
+            empty_results = [{
+                "doc_id": 0,
+                "chunk_id": 0,
+                "content": "",
+                "metadata": {},
+                "score": 0.0
+            }]
+            try:
+                return self._generate_ai_response(query, empty_results, frontend_type)
+            except Exception as e:
+                return "抱歉，未找到相关信息。请尝试使用不同的关键词或联系管理员。"
+        
+        # 检查相关性分数
+        first_score = search_results[0].get("score", 0) if search_results else 0
+        
+        # 优化：即使相关性低，也使用AI生成响应（AI可以基于低相关性结果生成合理回答）
+        # 只有在相关性极高（>0.95）且配置允许时才使用快速路径
+        use_fast_path = USE_AI_RESPONSE and first_score > FAST_RESPONSE_THRESHOLD
+        
+        if use_fast_path:
+            try:
+                return self._generate_simple_response(query, search_results[:1], frontend_type)
+            except Exception as e:
+                pass  # 快速响应生成失败，回退到AI生成
+        
+        # 主要路径：使用AI生成响应（即使相关性低，AI也能基于搜索结果生成合理回答）
         try:
             return self._generate_ai_response(query, search_results, frontend_type)
         except Exception as e:
-            print(f"AI响应生成失败: {e}，使用简化版响应")
-            return self._generate_simple_response(query, search_results, frontend_type)
+            import traceback
+            traceback.print_exc()
+            # 如果AI失败，至少尝试用简化响应
+            if search_results:
+                return self._generate_simple_response(query, search_results, frontend_type)
+            return "抱歉，处理您的请求时出现了错误。"
     
-    def _generate_ai_response(self, query: str, search_results: List[Dict], 
-                              frontend_type: str) -> str:
-        """使用AI生成自然语言响应"""
+    async def _generate_ai_response_async(self, query: str, search_results: List[Dict], 
+                                          frontend_type: str) -> str:
+        """异步版本的AI响应生成（使用OpenRouter大模型）"""
         try:
             from app.services.orchestrator import orchestrator
             
-            # 如果配置了OpenAI API，使用AI生成响应
-            if orchestrator.ai_client:
-                # 构建上下文
-                context_parts = []
-                for idx, result in enumerate(search_results[:3], 1):
-                    content = result["content"]
-                    doc_id = result["metadata"]["doc_id"]
-                    filename = result["metadata"].get("filename", f"文档{doc_id}")
-                    context_parts.append(f"[文档{idx}] ({filename})\n{content[:500]}")
-                
-                context = "\n\n".join(context_parts)
-                
-                prompt = f"""你是一个知识管理系统的助手。请根据以下知识库内容，用自然、流畅的中文回答用户的问题。
+            if not orchestrator.async_ai_client:
+                # 如果没有异步客户端，回退到同步版本
+                return self._generate_ai_response(query, search_results, frontend_type)
+            
+            # 构建上下文（优化：减少文档数量和内容长度）
+            context_parts = []
+            has_content = False
+            for idx, result in enumerate(search_results[:2], 1):
+                content = result.get("content", "").strip()
+                if not content:
+                    continue
+                has_content = True
+                doc_id = result.get("metadata", {}).get("doc_id", 0)
+                filename = result.get("metadata", {}).get("filename", f"文档{doc_id}")
+                content_preview = content[:200] if len(content) > 200 else content  # 进一步减少内容长度
+                context_parts.append(f"[{filename}]\n{content_preview}")
+            
+            context = "\n\n".join(context_parts) if context_parts else ""
+            
+            # 根据是否有内容和相关性调整prompt
+            first_score = search_results[0].get("score", 0) if search_results else 0
+            
+            if not has_content or first_score < 0.3:
+                # 没有知识库内容或相关性极低，让AI基于通用知识回答
+                prompt = f"""用户问题：{query}
 
-用户问题：{query}
+注意：知识库中没有找到相关信息。
 
-知识库内容：
+要求：
+1. 基于你的通用知识回答用户的问题
+2. 用自然、流畅的中文直接回答
+3. 回答要准确、专业、易懂
+4. 如果问题超出你的知识范围，可以说明
+5. 不要标注来源，因为知识库中没有相关内容"""
+            elif first_score < 0.5:
+                # 相关性低，提示AI可以基于通用知识回答
+                prompt = f"""用户问题：{query}
+
+知识库内容（相关性较低，仅供参考）：
 {context}
 
 要求：
-1. 用自然、流畅的中文回答问题，就像在和朋友聊天一样
-2. 直接回答用户的问题，不要使用"根据知识库"、"根据文档"等生硬的开头
-3. 如果知识库中有相关信息，直接给出答案，并在回答末尾用【文档名】标注来源
-4. 如果信息不完整，说明已知部分
-5. 回答要准确、专业、易懂
-6. 保持回答简洁，但不要过于简短，要包含关键信息
+1. 如果知识库内容与问题相关，优先基于内容回答
+2. 如果知识库内容不相关或信息不足，可以基于你的通用知识补充回答
+3. 用自然中文直接回答，简洁准确
+4. 只有在明确使用了知识库内容时才标注【来源】，否则不要标注来源"""
+            else:
+                # 相关性正常，正常回答
+                prompt = f"""根据以下内容回答问题：
 
-示例：
-- 好的回答："员工每年有10天年假，可以累积最多20天。需要提前一周申请。【员工请假政策.docx】"
-- 不好的回答："根据知识库内容，年假有10天。"
+问题：{query}
 
-请直接给出回答："""
+内容：
+{context}
+
+要求：用自然中文直接回答，末尾标注【来源】。简洁准确。"""
+            
+            model_name = getattr(orchestrator, 'model', None) or "deepseek/deepseek-chat"
+            api_provider = getattr(orchestrator, 'api_provider', 'openai')
+            
+            request_params = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "知识助手，用自然中文直接回答。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3,  # 降低temperature以提高响应速度
+                "max_tokens": 200  # 减少max_tokens以提高响应速度
+            }
+            
+            if api_provider == "openrouter" and hasattr(orchestrator, 'default_headers'):
+                request_params["extra_headers"] = orchestrator.default_headers
+            
+            # 使用异步客户端调用OpenRouter API
+            response = await orchestrator.async_ai_client.chat.completions.create(**request_params)
+            ai_response = response.choices[0].message.content.strip()
+            
+            # 移除AI响应中可能错误添加的来源信息（如"来源:知识库内容不相关"）
+            import re
+            ai_response = re.sub(r'来源[：:]\s*知识库内容不相关', '', ai_response, flags=re.IGNORECASE)
+            ai_response = re.sub(r'来源[：:]\s*知识库中没有找到相关信息', '', ai_response, flags=re.IGNORECASE)
+            
+            # 添加来源引用（只有在有实际内容时才添加）
+            sources = []
+            seen_docs = set()
+            for result in search_results[:2]:
+                content = result.get("content", "").strip()
+                if not content:
+                    continue
+                doc_id = result.get("metadata", {}).get("doc_id", 0)
+                if doc_id <= 0:  # doc_id为0表示空结果，不添加来源
+                    continue
+                filename = result.get("metadata", {}).get("filename", f"文档{doc_id}")
+                if doc_id not in seen_docs:
+                    sources.append(filename)
+                    seen_docs.add(doc_id)
+            
+            # 只有在有实际来源且AI响应中没有错误来源信息时才添加
+            if sources and has_content and first_score >= 0.3:
+                ai_response += f"\n\n📚 来源：{', '.join(sources)}"
+            
+            return self._format_response(ai_response, frontend_type)
+        except Exception as e:
+            raise e
+    
+    def _generate_ai_response(self, query: str, search_results: List[Dict], 
+                              frontend_type: str) -> str:
+        """使用AI生成自然语言响应（使用OpenRouter大模型）"""
+        try:
+            from app.services.orchestrator import orchestrator
+            
+            # 如果配置了AI客户端，使用AI生成响应
+            if orchestrator.ai_client:
+                api_provider = getattr(orchestrator, 'api_provider', 'openai')
+                model_name = getattr(orchestrator, 'model', None) or "deepseek/deepseek-chat"
+                # 构建上下文（优化：减少文档数量和内容长度）
+                context_parts = []
+                has_content = False
+                for idx, result in enumerate(search_results[:2], 1):  # 只取前2个最相关的结果
+                    content = result.get("content", "").strip()
+                    if not content:
+                        continue
+                    has_content = True
+                    doc_id = result.get("metadata", {}).get("doc_id", 0)
+                    if doc_id <= 0:  # 跳过空结果
+                        continue
+                    filename = result.get("metadata", {}).get("filename", f"文档{doc_id}")
+                    # 减少内容长度（从500到300字符）
+                    content_preview = content[:300] if len(content) > 300 else content
+                    context_parts.append(f"[{filename}]\n{content_preview}")
+                
+                context = "\n\n".join(context_parts) if context_parts else ""
+                
+                # 根据是否有内容和相关性调整prompt
+                first_score = search_results[0].get("score", 0) if search_results else 0
+                has_content = bool(context.strip())
+                
+                if not has_content or first_score < 0.3:
+                    # 没有知识库内容或相关性极低，让AI基于通用知识回答
+                    prompt = f"""用户问题：{query}
+
+注意：知识库中没有找到相关信息。
+
+要求：
+1. 基于你的通用知识回答用户的问题
+2. 用自然、流畅的中文直接回答
+3. 回答要准确、专业、易懂
+4. 如果问题超出你的知识范围，可以说明
+5. 不要标注来源，因为知识库中没有相关内容"""
+                elif first_score < 0.5:
+                    # 相关性低，提示AI可以基于通用知识回答
+                    prompt = f"""用户问题：{query}
+
+知识库内容（相关性较低，仅供参考）：
+{context}
+
+要求：
+1. 如果知识库内容与问题相关，优先基于内容回答
+2. 如果知识库内容不相关或信息不足，可以基于你的通用知识补充回答
+3. 用自然中文直接回答，简洁准确
+4. 只有在明确使用了知识库内容时才标注【来源】，否则不要标注来源"""
+                else:
+                    # 相关性正常，正常回答
+                    prompt = f"""根据以下内容回答问题：
+
+问题：{query}
+
+内容：
+{context}
+
+要求：用自然中文直接回答，末尾标注【来源】。简洁准确。"""
 
                 # 获取模型名称和headers
                 model_name = getattr(orchestrator, 'model', None) or "deepseek/deepseek-chat"
                 
-                # 准备请求参数
+                # 准备请求参数（优化：减少token和temperature以提高速度）
                 request_params = {
                     "model": model_name,
                     "messages": [
-                        {"role": "system", "content": "你是一个专业的知识管理助手，能够根据知识库内容准确回答用户问题。"},
+                        {"role": "system", "content": "知识助手，用自然中文直接回答。"},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 0.7,
-                    "max_tokens": 500
+                    "temperature": 0.5,  # 降低temperature以提高响应速度
+                    "max_tokens": 300  # 减少max_tokens以提高响应速度
                 }
                 
                 # 如果是OpenRouter，添加headers
-                if getattr(orchestrator, 'api_provider', 'openai') == "openrouter" and hasattr(orchestrator, 'default_headers'):
+                if api_provider == "openrouter" and hasattr(orchestrator, 'default_headers'):
                     request_params["extra_headers"] = orchestrator.default_headers
                 
+                # 调用OpenRouter API
                 response = orchestrator.ai_client.chat.completions.create(**request_params)
-                
                 ai_response = response.choices[0].message.content.strip()
                 
-                # 添加来源引用
+                # 移除AI响应中可能错误添加的来源信息（如"来源:知识库内容不相关"）
+                import re
+                ai_response = re.sub(r'来源[：:]\s*知识库内容不相关', '', ai_response, flags=re.IGNORECASE)
+                ai_response = re.sub(r'来源[：:]\s*知识库中没有找到相关信息', '', ai_response, flags=re.IGNORECASE)
+                
+                # 添加来源引用（只有在有实际内容且doc_id > 0时才添加）
                 sources = []
                 seen_docs = set()
                 for result in search_results[:3]:
-                    doc_id = result["metadata"]["doc_id"]
-                    filename = result["metadata"].get("filename", f"文档{doc_id}")
+                    content = result.get("content", "").strip()
+                    if not content:
+                        continue
+                    doc_id = result.get("metadata", {}).get("doc_id", 0)
+                    if doc_id <= 0:  # doc_id为0表示空结果，不添加来源
+                        continue
+                    filename = result.get("metadata", {}).get("filename", f"文档{doc_id}")
                     if doc_id not in seen_docs:
                         sources.append(filename)
                         seen_docs.add(doc_id)
                 
-                if sources:
+                # 只有在有实际来源且AI响应中没有错误来源信息时才添加
+                if sources and has_content and first_score >= 0.3:
                     ai_response += f"\n\n📚 来源：{', '.join(sources)}"
                 
                 # 根据前端类型调整格式

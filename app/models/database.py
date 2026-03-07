@@ -74,11 +74,12 @@ class Database:
             )
         """)
         
-        # 前端集成配置表
+        # 前端集成配置表（支持多个Bot实例）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS frontend_integrations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 frontend_type TEXT NOT NULL,
+                name TEXT,
                 status TEXT DEFAULT 'disconnected',
                 config_data TEXT,
                 api_key_hash TEXT,
@@ -87,6 +88,12 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # 添加name字段（如果不存在）
+        try:
+            cursor.execute("ALTER TABLE frontend_integrations ADD COLUMN name TEXT")
+        except sqlite3.OperationalError:
+            pass  # 字段已存在
         
         # 分析指标表
         cursor.execute("""
@@ -97,6 +104,16 @@ class Database:
                 metric_value REAL,
                 metadata TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # 全局配置表（用于存储webhook URL等全局配置）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS global_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                config_key TEXT NOT NULL UNIQUE,
+                config_value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         

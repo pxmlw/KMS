@@ -8,10 +8,11 @@ from datetime import datetime
 
 try:
     import openai
-    from openai import OpenAI
+    from openai import OpenAI, AsyncOpenAI
 except ImportError:
     openai = None
     OpenAI = None
+    AsyncOpenAI = None
 
 import os
 from app.config import AI_CONFIDENCE_THRESHOLD, DEFAULT_INTENT_SPACE
@@ -30,17 +31,26 @@ class Orchestrator:
         self.api_provider = api_provider.lower()
         self.model = model
         
-        # AI客户端（如果配置了API Key）
+        # AI客户端（同步和异步，如果配置了API Key）
         self.ai_client = None
-        if api_key and OpenAI:
+        self.async_ai_client = None
+        if api_key and OpenAI and AsyncOpenAI:
             try:
                 if self.api_provider == "openrouter":
                     # OpenRouter配置（默认使用豆包模型）
                     base_url = base_url or "https://openrouter.ai/api/v1"
                     self.model = model or "deepseek/deepseek-chat"
+                    # 同步客户端（用于向后兼容）
                     self.ai_client = OpenAI(
                         api_key=api_key,
                         base_url=base_url
+                    )
+                    # 异步客户端（用于性能优化）
+                    self.async_ai_client = AsyncOpenAI(
+                        api_key=api_key,
+                        base_url=base_url,
+                        timeout=5.0,  # 减少超时时间以提高响应速度
+                        max_retries=1  # 减少重试次数以提高响应速度
                     )
                     # 保存默认headers用于OpenRouter（可选，用于app attribution）
                     self.default_headers = {
@@ -50,9 +60,29 @@ class Orchestrator:
                 else:
                     # OpenAI配置
                     self.ai_client = OpenAI(api_key=api_key)
+                    self.async_ai_client = AsyncOpenAI(
+                        api_key=api_key,
+                        timeout=5.0,  # 减少超时时间以提高响应速度
+                        max_retries=1  # 减少重试次数以提高响应速度
+                    )
                     self.default_headers = {}
             except Exception as e:
-                print(f"警告：无法初始化AI客户端: {e}")
+                pass  # AI客户端初始化失败，将使用关键词分类
+    
+    async def classify_intent_async(self, query: str, context: Optional[Dict] = None) -> Tuple[str, float]:
+        """异步版本的意图分类"""
+        # 获取所有意图空间
+        intent_spaces = self._get_intent_spaces()
+        
+        if not intent_spaces:
+            return (self.default_intent, 0.5)
+        
+        # 使用AI进行分类（如果有AI客户端）
+        if self.async_ai_client:
+            return await self._ai_classify_async(query, intent_spaces, context)
+        else:
+            # 回退到基于关键词的简单分类
+            return self._keyword_classify(query, intent_spaces)
     
     def classify_intent(self, query: str, context: Optional[Dict] = None) -> Tuple[str, float]:
         """
@@ -96,6 +126,84 @@ class Orchestrator:
             for row in rows
         ]
     
+    async def _ai_classify_async(self, query: str, intent_spaces: List[Dict], 
+                                 context: Optional[Dict]) -> Tuple[str, float]:
+        """异步版本的AI分类（优化：使用异步客户端）"""
+        if not self.async_ai_client:
+            return self._keyword_classify(query, intent_spaces)
+        
+        try:
+            # 优化：先快速检查关键词，如果匹配度高则直接返回，避免AI调用
+            keyword_result = self._keyword_classify(query, intent_spaces)
+            if keyword_result[1] > 0.6:  # 如果关键词分类置信度>0.6，直接使用
+                return keyword_result
+            
+            # 构建提示词（动态生成，支持所有意图空间）
+            intent_names = [s["name"] for s in intent_spaces]
+            intent_list = ", ".join(intent_names)
+            
+            # 动态构建规则描述（基于意图空间的描述和关键词）
+            rules = []
+            for space in intent_spaces:
+                if space.get("description"):
+                    rules.append(f"{space['name']}: {space['description']}")
+                elif space.get("keywords"):
+                    keywords_str = ", ".join(space["keywords"][:5])  # 只显示前5个关键词
+                    rules.append(f"{space['name']}: {keywords_str}")
+            
+            rules_text = "\n".join(rules) if rules else "根据查询内容匹配最相关的意图空间"
+            
+            prompt = f"""分类查询到意图空间：{intent_list}
+
+意图空间说明：
+{rules_text}
+
+查询：{query}
+
+返回JSON：{{"intent": "意图空间名称", "confidence": 0.0-1.0}}"""
+            
+            # 调用AI API（异步）
+            model_name = self.model if self.model else "deepseek/deepseek-chat"
+            
+            request_params = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "只返回JSON。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 50
+            }
+            
+            if self.api_provider == "openrouter" and hasattr(self, 'default_headers'):
+                request_params["extra_headers"] = self.default_headers
+            
+            # 使用异步客户端
+            response = await self.async_ai_client.chat.completions.create(**request_params)
+            
+            # 解析响应
+            response_text = response.choices[0].message.content.strip()
+            if response_text.startswith('```'):
+                response_text = response_text.split('```')[1]
+                if response_text.startswith('json'):
+                    response_text = response_text[4:]
+            
+            result = json.loads(response_text)
+            intent_name = result.get("intent", self.default_intent)
+            confidence = float(result.get("confidence", 0.5))
+            
+            # 验证意图空间存在
+            intent_names = [s["name"] for s in intent_spaces]
+            if intent_name not in intent_names:
+                return self._keyword_classify(query, intent_spaces)
+            
+            if confidence < self.confidence_threshold:
+                return self._keyword_classify(query, intent_spaces)
+            
+            return (intent_name, confidence)
+        except Exception as e:
+            return self._keyword_classify(query, intent_spaces)
+    
     def _ai_classify(self, query: str, intent_spaces: List[Dict], 
                             context: Optional[Dict]) -> Tuple[str, float]:
         """
@@ -107,49 +215,47 @@ class Orchestrator:
         - 提供置信度分数
         """
         try:
-            # 构建提示词
-            intent_descriptions = []
-            for space in intent_spaces:
-                keywords_str = ', '.join(space["keywords"])  # 显示所有关键词
-                intent_descriptions.append(
-                    f"- {space['name']}: {space['description']} "
-                    f"(关键词: {keywords_str})"
-                )
+            # 优化：先快速检查关键词，如果匹配度高则直接返回，避免AI调用
+            keyword_result = self._keyword_classify(query, intent_spaces)
+            if keyword_result[1] > 0.6:  # 如果关键词分类置信度>0.6，直接使用
+                return keyword_result
             
-            prompt = f"""你是一个知识管理系统的意图分类器。请分析以下查询，并判断它属于哪个意图空间。
+            # 构建提示词（动态生成，支持所有意图空间）
+            intent_names = [s["name"] for s in intent_spaces]
+            intent_list = ", ".join(intent_names)
+            
+            # 动态构建规则描述（基于意图空间的描述和关键词）
+            rules = []
+            for space in intent_spaces:
+                if space.get("description"):
+                    rules.append(f"{space['name']}: {space['description']}")
+                elif space.get("keywords"):
+                    keywords_str = ", ".join(space["keywords"][:5])  # 只显示前5个关键词
+                    rules.append(f"{space['name']}: {keywords_str}")
+            
+            rules_text = "\n".join(rules) if rules else "根据查询内容匹配最相关的意图空间"
+            
+            prompt = f"""分类查询到意图空间：{intent_list}
 
-可用意图空间：
-{'\n'.join(intent_descriptions)}
+意图空间说明：
+{rules_text}
 
-查询："{query}"
+查询：{query}
 
-重要分类规则（按优先级）：
-1. Legal（法律）：劳动合同、试用期、保密协议、知识产权、法律合规、诉讼、争议解决、合同签订等
-2. HR（人力资源）：员工福利、年假、薪资发放、招聘、培训、员工政策（但不包括劳动合同和试用期）
-3. Finance（财务）：财务报销、预算管理、会计、发票、成本等
-
-特别注意：
-- "试用期"、"劳动合同"、"保密协议" 必须分类到 Legal，不是 HR
-- "员工年假"、"薪资发放" 分类到 HR
-- "报销"、"预算" 分类到 Finance
-
-请返回JSON格式：
-{{"intent": "意图空间名称（必须是HR、Legal或Finance之一）", "confidence": 0.0-1.0, "reasoning": "简短原因"}}
-
-只返回JSON，不要其他文本。"""
+返回JSON：{{"intent": "意图空间名称", "confidence": 0.0-1.0}}"""
             
             # 调用AI API
             model_name = self.model if self.model else "deepseek/deepseek-chat"
             
-            # 准备请求参数
+            # 准备请求参数（优化：减少token和temperature以提高速度）
             request_params = {
                 "model": model_name,
                 "messages": [
-                    {"role": "system", "content": "你是一个专业的意图分类助手。"},
+                    {"role": "system", "content": "只返回JSON。"},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.3,
-                "max_tokens": 200
+                "temperature": 0.2,  # 降低temperature以提高速度
+                "max_tokens": 50  # 减少max_tokens（分类只需要简短JSON）
             }
             
             # 如果是OpenRouter，添加headers
@@ -175,18 +281,15 @@ class Orchestrator:
             intent_names = [s["name"] for s in intent_spaces]
             if intent_name not in intent_names:
                 # AI返回的意图名称不在列表中，回退到关键词分类
-                print(f"AI返回的意图 '{intent_name}' 不在意图空间列表中，回退到关键词分类")
                 return self._keyword_classify(query, intent_spaces)
             
             # 应用置信度阈值
             if confidence < self.confidence_threshold:
                 # 置信度太低，回退到关键词分类
-                print(f"AI分类置信度 {confidence:.2f} 低于阈值 {self.confidence_threshold}，回退到关键词分类")
                 return self._keyword_classify(query, intent_spaces)
             
             return (intent_name, confidence)
         except Exception as e:
-            print(f"AI分类失败: {e}，回退到关键词分类")
             return self._keyword_classify(query, intent_spaces)
     
     def _keyword_classify(self, query: str, intent_spaces: List[Dict]) -> Tuple[str, float]:
@@ -201,26 +304,7 @@ class Orchestrator:
         # 提取查询中的关键词（2个字符以上的中文词）
         query_keywords = re.findall(r'[\u4e00-\u9fff]{2,}', query_lower)
         
-        # 特殊规则：某些关键词有明确的意图归属
-        legal_keywords = ['试用期', '劳动合同', '保密协议', '知识产权', '法律', '合规', '诉讼', '争议', '合同']
-        hr_keywords = ['年假', '薪资', '工资', '招聘', '培训', '福利']
-        finance_keywords = ['报销', '预算', '财务', '发票', '会计']
-        
-        # 检查查询中是否包含特殊关键词
-        has_legal_keyword = any(kw in query for kw in legal_keywords)
-        has_hr_keyword = any(kw in query for kw in hr_keywords)
-        has_finance_keyword = any(kw in query for kw in finance_keywords)
-        
-        # 如果查询包含特殊关键词，优先匹配
-        if has_legal_keyword and not (has_hr_keyword and not has_legal_keyword):
-            # 查找Legal意图空间
-            for space in intent_spaces:
-                if space["name"] == "Legal":
-                    keywords = [k.lower().strip() for k in space["keywords"]]
-                    matches = sum(1 for keyword in keywords if keyword in query_lower)
-                    if matches > 0:
-                        return ("Legal", 0.7)  # 高置信度
-        
+        # 动态遍历所有意图空间，不再硬编码特定意图空间的关键词
         for space in intent_spaces:
             keywords = [k.lower().strip() for k in space["keywords"]]
             # 计算匹配分数

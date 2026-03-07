@@ -1,7 +1,7 @@
 """
 API路由
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Request, Request
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from typing import Optional, List
 from pydantic import BaseModel
@@ -25,7 +25,7 @@ router = APIRouter()
 class QueryRequest(BaseModel):
     query: str
     frontend_type: Optional[str] = "api"
-    include_debug_info: Optional[bool] = False  # 是否包含调试信息（原始文档内容）
+    include_debug_info: Optional[bool] = False
 
 
 class IntentSpaceCreate(BaseModel):
@@ -89,8 +89,8 @@ async def upload_document(
                 # 添加到知识库
                 kb.add_document(doc_id, raw_content, metadata, intent_space_id)
             except Exception as e:
-                print(f"警告：添加到知识库失败: {e}")
                 # 即使失败也返回成功，因为文档已经保存到数据库
+                pass
         
         return {
             "message": "文档上传成功",
@@ -104,10 +104,16 @@ async def upload_document(
 # 查询
 @router.post("/query")
 async def query_knowledge_base(request: QueryRequest):
-    """查询知识库"""
+    """查询知识库（优化：使用异步调用）"""
     try:
-        # 意图分类
-        detected_intent, confidence = orchestrator.classify_intent(request.query)
+        import asyncio
+        
+        # 异步意图分类（如果支持）
+        if hasattr(orchestrator, 'async_ai_client') and orchestrator.async_ai_client:
+            detected_intent, confidence = await orchestrator.classify_intent_async(request.query)
+        else:
+            # 回退到同步版本
+            detected_intent, confidence = orchestrator.classify_intent(request.query)
         
         # 路由查询
         route_info = orchestrator.route_query(
@@ -115,13 +121,19 @@ async def query_knowledge_base(request: QueryRequest):
         )
         intent_space_id = route_info["intent_space_id"]
         
-        # 知识库搜索
+        # 知识库搜索（本地操作，很快）
         search_results = kb.search(request.query, intent_space_id, top_k=5)
         
-        # 生成响应
-        response_text = kb.generate_response(
-            request.query, search_results, request.frontend_type
-        )
+        # 异步生成响应（如果支持）
+        if hasattr(kb, 'generate_response_async'):
+            response_text = await kb.generate_response_async(
+                request.query, search_results, request.frontend_type
+            )
+        else:
+            # 回退到同步版本
+            response_text = kb.generate_response(
+                request.query, search_results, request.frontend_type
+            )
         
         # 记录查询
         response_status = "success" if search_results else "no_match"
@@ -230,6 +242,66 @@ async def get_documents(
         {
             "id": row["id"],
             "filename": row["filename"],
+            "file_path": row["file_path"],
+            "file_format": row["file_format"],
+            "file_size": row["file_size"],
+            "upload_date": row["upload_date"],
+            "status": row["status"],
+            "intent_space_id": row["intent_space_id"]
+        }
+        for row in rows
+    ]
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document(doc_id: int):
+    """删除文档"""
+    conn = None
+    try:
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        
+        # 获取文档信息
+        cursor.execute("SELECT file_path FROM documents WHERE id = ?", (doc_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="文档不存在")
+        
+        file_path = row["file_path"]
+        
+        # 从知识库删除
+        kb.delete_document(doc_id)
+        
+        # 删除文件
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass  # 文件删除失败不影响数据库删除
+        
+        # 从数据库删除
+        cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        conn.commit()
+        conn.close()
+        
+        return {"message": "文档删除成功", "doc_id": doc_id}
+    except HTTPException:
+        if conn:
+            conn.close()
+        raise
+    except Exception as e:
+        if conn:
+            conn.close()
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    return [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
             "file_format": row["file_format"],
             "file_size": row["file_size"],
             "upload_date": row["upload_date"],
@@ -270,9 +342,9 @@ async def get_query_history(limit: int = Query(100)):
 
 
 @router.get("/analytics/accuracy")
-async def get_classification_accuracy(days: int = Query(7)):
-    """获取分类准确率"""
-    return analytics.get_classification_accuracy(days)
+async def get_classification_accuracy(hours: int = Query(24)):
+    """获取分类准确率统计（按小时）"""
+    return analytics.get_classification_accuracy(hours)
 
 
 @router.get("/analytics/kb-usage")
@@ -291,11 +363,10 @@ async def teams_messages(request: Request):
         
         teams_bot = get_teams_bot()
         if not teams_bot or not teams_bot.adapter:
-            print("ERROR: Teams Bot未配置 - 请设置TEAMS_APP_ID和TEAMS_APP_PASSWORD")
             return JSONResponse(
                 content={
                     "error": "Teams Bot未配置",
-                    "message": "请设置TEAMS_APP_ID和TEAMS_APP_PASSWORD环境变量"
+                    "message": "请在管理界面配置Teams Bot"
                 },
                 status_code=503
             )
@@ -307,7 +378,6 @@ async def teams_messages(request: Request):
         try:
             body = await request.json()
         except Exception as e:
-            print(f"ERROR: 无法解析请求体: {e}")
             return JSONResponse(
                 content={"error": "无效的请求体", "message": str(e)},
                 status_code=400
@@ -317,8 +387,6 @@ async def teams_messages(request: Request):
         try:
             activity = Activity().deserialize(body)
         except Exception as e:
-            print(f"ERROR: 无法反序列化Activity: {e}")
-            print(f"请求体: {body}")
             return JSONResponse(
                 content={"error": "无效的Activity格式", "message": str(e)},
                 status_code=400
@@ -332,10 +400,6 @@ async def teams_messages(request: Request):
                     await turn_context.send_activity(response_activity)
             except Exception as e:
                 import traceback
-                print(f"ERROR: 处理消息时出错: {e}")
-                print(f"ERROR: 错误类型: {type(e).__name__}")
-                
-                # 记录错误堆栈
                 traceback.print_exc()
                 
                 # 发送错误消息给用户
@@ -347,8 +411,7 @@ async def teams_messages(request: Request):
                         )
                     )
                 except Exception as send_error:
-                    print(f"ERROR: 无法发送错误消息: {send_error}")
-                    print(f"ERROR: 发送错误详情: {type(send_error).__name__}: {send_error}")
+                    pass  # 无法发送错误消息，忽略
         
         # Bot Framework适配器的process_activity方法签名：
         # process_activity(req, auth_header: str, logic: Callable)
@@ -377,8 +440,7 @@ async def teams_messages(request: Request):
                 raise e2
         except Exception as e:
             import traceback
-            print(f"ERROR: process_activity失败: {e}")
-            print(traceback.format_exc())
+            traceback.print_exc()
             # 如果process_activity失败，返回错误响应
             return JSONResponse(
                 content={
@@ -393,7 +455,6 @@ async def teams_messages(request: Request):
         return Response(status_code=200)
         
     except ImportError as e:
-        print(f"ERROR: Bot Framework未安装: {e}")
         return JSONResponse(
             content={
                 "error": "Bot Framework未安装",
@@ -404,9 +465,7 @@ async def teams_messages(request: Request):
         )
     except Exception as e:
         import traceback
-        error_trace = traceback.format_exc()
-        print(f"ERROR: 处理Teams消息时发生未预期的错误: {e}")
-        print(error_trace)
+        traceback.print_exc()
         return JSONResponse(
             content={
                 "error": "处理Teams消息失败",

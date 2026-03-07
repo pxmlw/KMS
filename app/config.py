@@ -22,14 +22,9 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 # AI配置
 AI_CONFIDENCE_THRESHOLD = 0.7  # 意图分类置信度阈值
 DEFAULT_INTENT_SPACE = "General"
+USE_AI_RESPONSE = True  # 是否使用AI生成响应（False则总是使用简化响应）
+FAST_RESPONSE_THRESHOLD = 0.95  # 快速响应阈值（score > 此值才使用简化响应，提高阈值确保大部分使用AI）
 
-# 前端集成配置
-TELEGRAM_API_URL = "https://api.telegram.org/bot"
-TEAMS_API_URL = "https://graph.microsoft.com/v1.0"
-
-# 响应配置
-MAX_RESPONSE_LENGTH = 2000  # Telegram消息最大长度
-RESPONSE_TIMEOUT = 3  # 响应超时时间（秒）
 
 # 创建必要的目录
 DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)

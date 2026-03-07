@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
+import asyncio
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -25,12 +27,43 @@ os.environ['no_proxy'] = os.environ['NO_PROXY']  # 确保小写版本也设置
 
 # 导入API路由
 from app.api.routes import router as api_router
+from app.services.bot_monitor import bot_monitor
+from app.models.database import db
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时执行
+    print("[启动] 重置所有Bot连接状态为disconnected...")
+    # 服务启动时，将所有Bot状态重置为disconnected，因为服务刚启动时Bot服务可能还没运行
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE frontend_integrations 
+        SET status = 'disconnected', updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'connected'
+    """)
+    conn.commit()
+    conn.close()
+    print("[启动] Bot状态已重置")
+    
+    print("[启动] 启动Bot连接状态监控服务...")
+    bot_monitor.start()
+    
+    yield
+    
+    # 关闭时执行
+    print("[关闭] 停止Bot连接状态监控服务...")
+    bot_monitor.stop()
+
 
 # 创建FastAPI应用实例
 app = FastAPI(
     title="IntelliKnow KMS API",
     description="Gen AI驱动的知识管理系统API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # 配置CORS

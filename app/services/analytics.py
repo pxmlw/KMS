@@ -3,11 +3,32 @@
 记录查询历史、跟踪指标、知识库使用统计
 """
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from collections import Counter
 
 from app.models.database import db
+
+
+def utc_to_beijing(utc_time_str: str) -> str:
+    """将UTC时间字符串转换为北京时间（UTC+8）"""
+    try:
+        # 解析UTC时间字符串（格式：YYYY-MM-DD HH:MM:SS）
+        if isinstance(utc_time_str, str) and ' ' in utc_time_str:
+            dt = datetime.strptime(utc_time_str, "%Y-%m-%d %H:%M:%S")
+        else:
+            return utc_time_str  # 如果格式不对，直接返回
+        
+        # UTC时区
+        utc_dt = dt.replace(tzinfo=timezone.utc)
+        # 转换为北京时间（UTC+8）
+        beijing_tz = timezone(timedelta(hours=8))
+        beijing_dt = utc_dt.astimezone(beijing_tz)
+        
+        # 返回格式化字符串
+        return beijing_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return utc_time_str  # 转换失败时返回原值
 
 
 class Analytics:
@@ -65,14 +86,20 @@ class Analytics:
                 "confidence": row["confidence"],
                 "response_status": row["response_status"],
                 "frontend_type": row["frontend_type"],
-                "timestamp": row["timestamp"]
+                "timestamp": utc_to_beijing(row["timestamp"])  # 转换为北京时间
             }
             for row in rows
         ]
     
-    def get_classification_accuracy(self, days: int = 7) -> Dict:
+    def get_classification_accuracy(self, hours: int = 24) -> Dict:
         """
-        获取分类准确率统计
+        获取分类准确率统计（按小时计算）
+        
+        注意：这里的"准确率"实际上是"高置信度查询的比例"（置信度 >= 阈值的查询数 / 总查询数）
+        不是真正的准确率（因为没有真实标签来对比）
+        
+        Args:
+            hours: 时间范围（小时数），默认24小时（1天）
         
         Returns:
             包含准确率指标的字典
@@ -80,14 +107,41 @@ class Analytics:
         conn = db.get_connection()
         cursor = conn.cursor()
         
-        # 获取最近N天的查询
-        since_date = datetime.now() - timedelta(days=days)
+        # 获取最近N小时的查询（修复时间比较问题）
+        # 确保 hours 是整数，防止类型错误
+        try:
+            hours_int = int(hours) if hours else 24
+            # 验证范围：1-720小时（30天）
+            if hours_int < 1 or hours_int > 720:
+                hours_int = 24  # 默认值
+        except (ValueError, TypeError):
+            hours_int = 24  # 默认值
+        
+        # 计算起始时间
+        # 使用UTC时间进行计算（数据库存储的是UTC时间）
+        now_utc = datetime.now(timezone.utc)
+        since_date_utc = now_utc - timedelta(hours=hours_int)
+        # SQLite TIMESTAMP 比较：转换为字符串格式进行比较（UTC时间）
+        since_date_str = since_date_utc.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # SQLite时间比较：使用julianday进行精确比较
         cursor.execute("""
-            SELECT detected_intent, intent_space_id, confidence
+            SELECT detected_intent, intent_space_id, confidence, timestamp
             FROM query_history
-            WHERE timestamp >= ?
-        """, (since_date,))
+            WHERE julianday(timestamp) >= julianday(?)
+            ORDER BY timestamp DESC
+        """, (since_date_str,))
         rows = cursor.fetchall()
+        
+        # 注意：ORDER BY timestamp DESC，所以第一条是最新的，最后一条是最旧的
+        if rows:
+            # 将UTC时间转换为北京时间（UTC+8）
+            first_timestamp = utc_to_beijing(rows[0]["timestamp"])  # 最新的时间戳
+            last_timestamp = utc_to_beijing(rows[-1]["timestamp"])  # 最旧的时间戳
+        else:
+            first_timestamp = None
+            last_timestamp = None
+        
         conn.close()
         
         if not rows:
@@ -95,7 +149,13 @@ class Analytics:
                 "total_queries": 0,
                 "average_confidence": 0.0,
                 "accuracy_rate": 0.0,
-                "intent_distribution": {}
+                "intent_distribution": {},
+                "period_hours": hours_int,
+                "date_range": {
+                    "since": since_date_str,
+                    "first_query": None,
+                    "last_query": None
+                }
             }
         
         total = len(rows)
@@ -117,7 +177,19 @@ class Analytics:
             "average_confidence": average_confidence,
             "accuracy_rate": accuracy_rate,
             "intent_distribution": dict(intent_distribution),
-            "period_days": days
+            "period_hours": hours_int,
+            "date_range": {
+                "since": since_date_str,
+                "first_query": first_timestamp,
+                "last_query": last_timestamp
+            },
+            "confidence_stats": {
+                "min": min(confidences) if confidences else 0.0,
+                "max": max(confidences) if confidences else 0.0,
+                "threshold": AI_CONFIDENCE_THRESHOLD,
+                "above_threshold": accurate_count,
+                "below_threshold": total - accurate_count
+            }
         }
     
     def get_kb_usage(self) -> Dict:
@@ -130,11 +202,21 @@ class Analytics:
         doc_stats = cursor.fetchone()
         
         # 最常访问的文档（通过查询历史）
+        # 统计逻辑：
+        # 1. 如果文档有意图空间，匹配相同意图空间的查询
+        # 2. 如果文档是通用文档（intent_space_id为NULL），匹配所有查询
         cursor.execute("""
-            SELECT d.id, d.filename, COUNT(qh.id) AS access_count
+            SELECT d.id, d.filename, d.upload_date, 
+                   COUNT(qh.id) AS access_count,
+                   MAX(qh.timestamp) AS last_access_date
             FROM documents d
-            LEFT JOIN query_history qh ON qh.intent_space_id = d.intent_space_id
-            GROUP BY d.id, d.filename
+            INNER JOIN query_history qh ON (
+                (d.intent_space_id IS NOT NULL AND qh.intent_space_id = d.intent_space_id)
+                OR (d.intent_space_id IS NULL)
+            )
+            WHERE qh.response_status = 'success'
+            GROUP BY d.id, d.filename, d.upload_date
+            HAVING access_count > 0
             ORDER BY access_count DESC
             LIMIT 10
         """)
@@ -159,6 +241,8 @@ class Analytics:
                 {
                     "doc_id": row["id"],
                     "filename": row["filename"],
+                    "upload_date": utc_to_beijing(row["upload_date"]) if row["upload_date"] else None,
+                    "last_access_date": utc_to_beijing(row["last_access_date"]) if row["last_access_date"] else None,
                     "access_count": row["access_count"] or 0
                 }
                 for row in top_docs
@@ -188,7 +272,7 @@ class Analytics:
         # 获取所有数据
         query_history = self.get_query_history(limit=10000)
         kb_usage = self.get_kb_usage()
-        accuracy = self.get_classification_accuracy()
+        accuracy = self.get_classification_accuracy(24)  # 默认24小时
         
         data = {
             "query_history": query_history,

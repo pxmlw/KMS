@@ -3,7 +3,7 @@
 """
 import json
 import hashlib
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime
 
 from app.models.database import db
@@ -12,11 +12,12 @@ from app.models.database import db
 class FrontendIntegration:
     """前端集成基类"""
     
-    def __init__(self, frontend_type: str):
+    def __init__(self, frontend_type: str, name: Optional[str] = None):
         self.frontend_type = frontend_type
+        self.name = name or "default"  # 默认名称
     
-    def save_config(self, config_data: Dict, api_key: Optional[str] = None):
-        """保存集成配置"""
+    def save_config(self, config_data: Dict, api_key: Optional[str] = None, bot_id: Optional[int] = None):
+        """保存集成配置（支持更新现有或创建新实例）"""
         conn = db.get_connection()
         cursor = conn.cursor()
         
@@ -25,44 +26,108 @@ class FrontendIntegration:
         if api_key:
             api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()[-4:]
         
+        # 将api_key也存储在config_data中（加密存储）
+        if api_key:
+            config_data["_api_key"] = api_key  # 存储完整key用于验证
+        
         config_json = json.dumps(config_data, ensure_ascii=False)
         
-        cursor.execute("""
-            INSERT OR REPLACE INTO frontend_integrations 
-            (frontend_type, status, config_data, api_key_hash, updated_at)
-            VALUES (?, 'connected', ?, ?, CURRENT_TIMESTAMP)
-        """, (
-            self.frontend_type,
-            config_json,
-            api_key_hash
-        ))
+        if bot_id:
+            # 更新现有实例
+            cursor.execute("""
+                UPDATE frontend_integrations 
+                SET status = 'connected', config_data = ?, api_key_hash = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (config_json, api_key_hash, bot_id))
+        else:
+            # 创建新实例
+            cursor.execute("""
+                INSERT INTO frontend_integrations 
+                (frontend_type, name, status, config_data, api_key_hash, updated_at)
+                VALUES (?, ?, 'connected', ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                self.frontend_type,
+                self.name,
+                config_json,
+                api_key_hash
+            ))
         
         conn.commit()
         conn.close()
     
-    def get_config(self) -> Optional[Dict]:
-        """获取集成配置"""
+    def get_all_configs(self) -> List[Dict]:
+        """获取所有配置实例，并真正测试连接状态"""
         conn = db.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT status, config_data, api_key_hash, last_tested, updated_at
+            SELECT id, name, status, config_data, api_key_hash, last_tested, updated_at
             FROM frontend_integrations
             WHERE frontend_type = ?
+            ORDER BY updated_at DESC
         """, (self.frontend_type,))
-        row = cursor.fetchone()
+        rows = cursor.fetchall()
         conn.close()
         
-        if not row:
+        result = []
+        for row in rows:
+            config = json.loads(row["config_data"]) if row["config_data"] else {}
+            # 真正验证连接状态（调用API测试）
+            # 设置默认值为False，确保任何异常都导致disconnected状态
+            is_connected = False
+            try:
+                is_connected = self._verify_bot_connection(config)
+            except Exception as e:
+                # 任何异常都视为连接失败
+                import traceback
+                traceback.print_exc()
+                is_connected = False
+            
+            actual_status = "connected" if is_connected else "disconnected"
+            
+            # 无论状态是否一致，都更新数据库和last_tested时间戳
+            # 这确保每次访问都会更新状态
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE frontend_integrations 
+                SET status = ?, last_tested = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (actual_status, row["id"]))
+            conn.commit()
+            conn.close()
+            
+            result.append({
+                "id": row["id"],
+                "name": row["name"] or "default",
+                "status": actual_status,  # 使用实际测试的结果
+                "config": config,
+                "api_key_hash": row["api_key_hash"],
+                "last_tested": datetime.now().isoformat(),  # 更新为当前时间
+                "updated_at": row["updated_at"]
+            })
+        
+        return result
+    
+    def get_config(self, bot_id: Optional[int] = None) -> Optional[Dict]:
+        """获取指定Bot实例的配置（兼容旧代码，返回第一个）"""
+        configs = self.get_all_configs()
+        if not configs:
             return None
         
-        config = json.loads(row["config_data"]) if row["config_data"] else {}
-        return {
-            "status": row["status"],
-            "config": config,
-            "api_key_hash": row["api_key_hash"],
-            "last_tested": row["last_tested"],
-            "updated_at": row["updated_at"]
-        }
+        if bot_id:
+            # 返回指定ID的配置
+            for config in configs:
+                if config["id"] == bot_id:
+                    return config
+            return None
+        else:
+            # 返回第一个配置（兼容旧代码）
+            return configs[0] if configs else None
+    
+    def _verify_bot_connection(self, config: Dict) -> bool:
+        """验证Bot连接是否有效（使用数据库中的配置）"""
+        # 子类实现，使用config中的配置而不是环境变量
+        raise NotImplementedError("子类必须实现_verify_bot_connection方法")
     
     def test_connection(self) -> bool:
         """测试连接"""

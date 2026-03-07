@@ -4,15 +4,20 @@ Streamlit管理界面
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
-import json
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
 
 # 加载环境变量
 load_dotenv()
 
 from app.models.database import db
-from app.services.analytics import analytics
+from app.services.analytics import analytics, utc_to_beijing
 from app.services.document_parser import document_parser
 from app.services.knowledge_base import kb
 from app.integrations.telegram_bot import create_telegram_bot
@@ -25,14 +30,29 @@ def init_session_state():
         st.session_state.initialized = True
 
 
+@st.cache_data(ttl=60)  # 缓存60秒
+def _get_kb_stats():
+    """获取知识库统计（带缓存）"""
+    return analytics.get_kb_usage()
+
+# 移除缓存，因为时间范围是动态的，缓存会导致数据不更新
+def _get_accuracy_stats(hours=24):
+    """获取准确率统计（按小时）"""
+    return analytics.get_classification_accuracy(hours)
+
+@st.cache_data(ttl=30)  # 缓存30秒
+def _get_query_history(limit=10):
+    """获取查询历史（带缓存）"""
+    return analytics.get_query_history(limit)
+
 def main_dashboard():
     """主仪表板"""
     st.title("📊 IntelliKnow KMS - 管理仪表板")
     
     try:
-        # 获取统计数据
-        kb_stats = analytics.get_kb_usage()
-        accuracy_stats = analytics.get_classification_accuracy(7)
+        # 获取统计数据（使用缓存）
+        kb_stats = _get_kb_stats()
+        accuracy_stats = _get_accuracy_stats(24)  # 默认24小时（1天）
         
         # 统计卡片
         col1, col2, col3, col4 = st.columns(4)
@@ -61,9 +81,9 @@ def main_dashboard():
         else:
             st.info("暂无查询数据")
         
-        # 最近查询
+        # 最近查询（使用缓存）
         st.subheader("最近查询")
-        query_history = analytics.get_query_history(limit=10)
+        query_history = _get_query_history(limit=10)
         if query_history:
             df = pd.DataFrame(query_history)
             # 确保列存在
@@ -81,171 +101,429 @@ def main_dashboard():
         st.code(traceback.format_exc())
 
 
+@st.cache_data(ttl=30)  # 缓存30秒，避免频繁查询
+def _get_telegram_configs():
+    """获取Telegram配置（带缓存）"""
+    try:
+        from app.integrations.telegram_bot import TelegramBotIntegration
+        telegram_bot = TelegramBotIntegration()
+        return telegram_bot.get_all_configs()
+    except Exception as e:
+        return []
+
+@st.cache_data(ttl=30)  # 缓存30秒，避免频繁查询
+def _get_teams_configs():
+    """获取Teams配置（带缓存）"""
+    try:
+        from app.integrations.teams_bot import TeamsBotIntegration
+        teams_bot = TeamsBotIntegration()
+        return teams_bot.get_all_configs()
+    except Exception as e:
+        return []
+
 def frontend_integration_page():
     """前端集成管理页面"""
     st.title("🔌 前端集成管理")
     
-    # 加载已保存的配置
-    telegram_config = None
-    teams_config = None
-    try:
-        from app.integrations.telegram_bot import TelegramBotIntegration
-        from app.integrations.teams_bot import TeamsBotIntegration
-        
-        telegram_bot = TelegramBotIntegration()
-        telegram_config = telegram_bot.get_config()
-        
-        teams_bot = TeamsBotIntegration()
-        teams_config = teams_bot.get_config()
-    except Exception as e:
-        st.warning(f"加载配置失败: {e}")
+    # 使用缓存函数获取配置
+    telegram_configs = _get_telegram_configs()
+    teams_configs = _get_teams_configs()
     
-    # Telegram集成
-    st.subheader("Telegram Bot")
+    # 如果加载失败，显示警告
+    if not telegram_configs and not teams_configs:
+        st.warning("⚠️ 加载配置失败，请刷新页面重试")
     
-    # 显示当前配置
-    if telegram_config:
-        st.info(f"✅ 当前已配置（状态: {telegram_config['status']}）")
-        config = telegram_config.get('config', {})
-        if config.get('username'):
-            st.caption(f"Bot用户名: @{config['username']}")
-        if config.get('first_name'):
-            st.caption(f"Bot名称: {config['first_name']}")
-        if config.get('id'):
-            st.caption(f"Bot ID: {config['id']}")
-        if telegram_config.get('api_key_hash'):
-            st.caption(f"Token哈希: ...{telegram_config['api_key_hash']}")
-        if telegram_config.get('updated_at'):
-            st.caption(f"最后更新: {telegram_config['updated_at']}")
+    # Telegram Bot管理
+    st.subheader("Telegram Bot 管理")
     
-    telegram_token = st.text_input(
-        "Telegram Bot Token", 
-        type="password",
-        value="",  # 不显示已保存的token
-        help="输入Telegram Bot Token，可在@BotFather获取"
-    )
+    # 初始化session_state
+    if 'editing_telegram_id' not in st.session_state:
+        st.session_state.editing_telegram_id = None
     
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("保存并连接Telegram", type="primary"):
-            if telegram_token:
-                try:
-                    bot = create_telegram_bot(telegram_token)
-                    if bot.test_connection():
-                        bot_info = bot.get_bot_info()
-                        if bot_info:
-                            st.success(f"✅ Telegram Bot连接成功！\nBot: @{bot_info.get('username', 'N/A')} ({bot_info.get('first_name', 'N/A')})")
-                        else:
-                            st.success("✅ Telegram Bot连接成功并已保存配置！")
-                        st.rerun()  # 刷新页面显示新配置
+    # 显示所有Telegram Bot实例
+    if telegram_configs:
+        st.write("**已配置的Telegram Bot实例：**")
+        for config in telegram_configs:
+            status_icon = "🟢" if config['status'] == 'connected' else "🔴"
+            bot_config = config.get('config', {})
+            
+            with st.expander(f"{status_icon} {config['name']} - {config['status']}"):
+                # 显示配置信息
+                if bot_config.get('username'):
+                    st.write(f"**Bot用户名**: @{bot_config['username']}")
+                if bot_config.get('first_name'):
+                    st.write(f"**Bot名称**: {bot_config['first_name']}")
+                if bot_config.get('id'):
+                    st.write(f"**Bot ID**: {bot_config['id']}")
+                if config.get('api_key_hash'):
+                    st.write(f"**Token哈希**: ...{config['api_key_hash']}")
+                if config.get('updated_at'):
+                    updated_time = utc_to_beijing(config['updated_at']) if config['updated_at'] else "未知"
+                    st.write(f"**最后更新**: {updated_time}")
+                
+                # 编辑/保存按钮
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.session_state.editing_telegram_id == config['id']:
+                        # 编辑模式
+                        st.write("**编辑配置：**")
+                        edit_name = st.text_input("Bot名称", value=config['name'], key=f"edit_telegram_name_{config['id']}")
+                        edit_token = st.text_input(
+                            "Telegram Bot Token", 
+                            type="password",
+                            value="",  # 不显示已保存的token
+                            key=f"edit_telegram_token_{config['id']}",
+                            help="留空则不修改Token"
+                        )
+                        
+                        col_save, col_cancel = st.columns(2)
+                        with col_save:
+                            if st.button("保存", key=f"save_edit_telegram_{config['id']}"):
+                                try:
+                                    # 获取当前token（如果未修改）
+                                    current_token = bot_config.get('_api_key')
+                                    new_token = edit_token.strip() if edit_token.strip() else current_token
+                                    
+                                    if new_token:
+                                        # 更新配置
+                                        bot = create_telegram_bot(new_token, edit_name.strip() or None, config['id'])
+                                        if bot.test_connection():
+                                            st.success("✅ 配置已更新！")
+                                            st.session_state.editing_telegram_id = None
+                                            st.rerun()
+                                        else:
+                                            st.error("❌ 连接测试失败，请检查Token")
+                                    else:
+                                        st.warning("⚠️ Token不能为空")
+                                except Exception as e:
+                                    st.error(f"❌ 更新失败: {e}")
+                                    import traceback
+                                    st.code(traceback.format_exc())
+                        
+                        with col_cancel:
+                            if st.button("取消", key=f"cancel_edit_telegram_{config['id']}"):
+                                st.session_state.editing_telegram_id = None
+                                st.rerun()
                     else:
-                        st.error("❌ 连接失败，请检查Token")
-                except Exception as e:
-                    st.error(f"❌ 连接失败: {e}")
-                    import traceback
-                    st.code(traceback.format_exc())
-            else:
-                st.warning("⚠️ 请输入Bot Token")
+                        if st.button("✏️ 编辑", key=f"edit_telegram_{config['id']}"):
+                            st.session_state.editing_telegram_id = config['id']
+                            st.rerun()
+                
+                with col2:
+                    if st.button("🗑️ 删除", key=f"delete_telegram_{config['id']}"):
+                        conn = db.get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM frontend_integrations WHERE id = ?", (config['id'],))
+                        conn.commit()
+                        conn.close()
+                        st.success("已删除")
+                        if st.session_state.editing_telegram_id == config['id']:
+                            st.session_state.editing_telegram_id = None
+                        st.rerun()
+    else:
+        st.info("暂无Telegram Bot配置")
     
-    with col2:
-        if st.button("测试Telegram连接"):
-            if telegram_token:
-                try:
-                    bot = create_telegram_bot(telegram_token)
-                    if bot.test_connection():
-                        bot_info = bot.get_bot_info()
-                        if bot_info:
-                            st.success(f"✅ 连接测试成功！\nBot: @{bot_info.get('username', 'N/A')}")
+    # 添加新Telegram Bot
+    with st.expander("➕ 添加新的Telegram Bot"):
+        telegram_name = st.text_input("Bot名称（可选）", key="telegram_name", value="")
+        telegram_token = st.text_input(
+            "Telegram Bot Token", 
+            type="password",
+            key="telegram_token",
+            help="输入Telegram Bot Token，可在@BotFather获取"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("保存并连接", key="save_telegram"):
+                if telegram_token:
+                    try:
+                        name = telegram_name.strip() if telegram_name.strip() else None
+                        bot = create_telegram_bot(telegram_token, name)
+                        if bot.test_connection():
+                            bot_info = bot.get_bot_info()
+                            if bot_info:
+                                st.success(f"✅ Telegram Bot连接成功！\nBot: @{bot_info.get('username', 'N/A')}")
+                            else:
+                                st.success("✅ Telegram Bot连接成功并已保存配置！")
+                            st.rerun()
                         else:
+                            st.error("❌ 连接失败，请检查Token")
+                    except Exception as e:
+                        st.error(f"❌ 连接失败: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                else:
+                    st.warning("⚠️ 请输入Bot Token")
+        
+        with col2:
+            if st.button("测试连接", key="test_telegram"):
+                if telegram_token:
+                    try:
+                        # 测试连接时不保存配置（save=False）
+                        bot = create_telegram_bot(telegram_token, save=False)
+                        if bot.test_connection():
+                            bot_info = bot.get_bot_info()
+                            if bot_info:
+                                st.success(f"✅ 连接测试成功！\nBot: @{bot_info.get('username', 'N/A')}")
+                            else:
+                                st.success("✅ 连接测试成功！")
+                        else:
+                            st.error("❌ 连接测试失败")
+                    except Exception as e:
+                        st.error(f"❌ 测试失败: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                else:
+                    st.warning("⚠️ 请输入Token进行测试")
+    
+    st.divider()
+    
+    # Teams Bot管理
+    st.subheader("Microsoft Teams Bot 管理")
+    
+    # 初始化session_state
+    if 'editing_teams_id' not in st.session_state:
+        st.session_state.editing_teams_id = None
+    
+    # 显示所有Teams Bot实例
+    if teams_configs:
+        st.write("**已配置的Teams Bot实例：**")
+        
+        # 获取Webhook URL（优先从数据库读取）
+        import os
+        from app.utils.tunnel_url_saver import get_webhook_url
+        
+        # 优先从数据库读取（Cloudflare Tunnel自动保存的完整webhook URL）
+        saved_webhook_url = get_webhook_url()
+        
+        # 如果没有，从环境变量读取并生成完整URL
+        if not saved_webhook_url:
+            tunnel_url = os.environ.get("TUNNEL_URL", "") or os.environ.get("CLOUDFLARE_TUNNEL_URL", "") or os.environ.get("WEBHOOK_URL", "")
+            if tunnel_url:
+                saved_webhook_url = f"{tunnel_url.rstrip('/')}/api/teams/messages"
+        
+        # 如果还没有，从Teams Bot配置中读取（兼容旧数据）
+        if not saved_webhook_url and teams_configs:
+            first_config = teams_configs[0].get('config', {})
+            base_url = first_config.get('webhook_base_url', '')
+            if base_url:
+                saved_webhook_url = f"{base_url.rstrip('/')}/api/teams/messages"
+        
+        # 显示Webhook URL（简洁版）
+        if saved_webhook_url:
+            st.write("**Webhook URL：**")
+            st.code(saved_webhook_url, language=None)
+            
+            # 测试按钮
+            if st.button("🔗 测试连接", key="test_webhook_url"):
+                if requests:
+                    try:
+                        # 测试健康检查端点（使用基础URL）
+                        base_url = saved_webhook_url.replace('/api/teams/messages', '')
+                        test_url = f"{base_url}/health"
+                        response = requests.get(test_url, timeout=5)
+                        if response.status_code == 200:
+                            st.success(f"✅ 连接成功！状态码: {response.status_code}")
+                        else:
+                            st.warning(f"⚠️ 返回状态码: {response.status_code}")
+                    except requests.exceptions.RequestException as e:
+                        st.error(f"❌ 连接失败: {e}")
+                else:
+                    st.warning("⚠️ requests库未安装，无法测试连接")
+        else:
+            st.info("⚠️ 未检测到Webhook URL，请启动Cloudflare Tunnel")
+        
+        st.divider()
+        
+        for config in teams_configs:
+            status_icon = "🟢" if config['status'] == 'connected' else "🔴"
+            bot_config = config.get('config', {})
+            
+            with st.expander(f"{status_icon} {config['name']} - {config['status']}"):
+                # 显示配置信息
+                if bot_config.get('app_id'):
+                    st.write(f"**App ID**: {bot_config['app_id']}")
+                if bot_config.get('tenant_id'):
+                    st.write(f"**Tenant ID**: {bot_config['tenant_id']}")
+                if config.get('api_key_hash'):
+                    st.write(f"**Password哈希**: ...{config['api_key_hash']}")
+                if config.get('updated_at'):
+                    updated_time = utc_to_beijing(config['updated_at']) if config['updated_at'] else "未知"
+                    st.write(f"**最后更新**: {updated_time}")
+                
+                # 显示Webhook URL配置状态（简化）
+                if saved_webhook_url:
+                    st.write(f"**Webhook URL**: `{saved_webhook_url}`")
+                
+                # 编辑/保存按钮
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.session_state.editing_teams_id == config['id']:
+                        # 编辑模式
+                        st.write("**编辑配置：**")
+                        edit_name = st.text_input("Bot名称", value=config['name'], key=f"edit_teams_name_{config['id']}")
+                        edit_app_id = st.text_input(
+                            "Teams App ID",
+                            value=bot_config.get('app_id', ''),
+                            key=f"edit_teams_app_id_{config['id']}"
+                        )
+                        edit_app_password = st.text_input(
+                            "Teams App Password", 
+                            type="password",
+                            value="",  # 不显示已保存的password
+                            key=f"edit_teams_app_password_{config['id']}",
+                            help="留空则不修改Password"
+                        )
+                        edit_tenant_id = st.text_input(
+                            "Tenant ID",
+                            value=bot_config.get('tenant_id', ''),
+                            key=f"edit_teams_tenant_id_{config['id']}"
+                        )
+                        
+                        col_save, col_cancel = st.columns(2)
+                        with col_save:
+                            if st.button("保存", key=f"save_edit_teams_{config['id']}"):
+                                try:
+                                    # 获取当前password（如果未修改）
+                                    current_password = bot_config.get('_app_password')
+                                    new_password = edit_app_password.strip() if edit_app_password.strip() else current_password
+                                    
+                                    if edit_app_id.strip() and new_password:
+                                        # 更新配置
+                                        tenant_id = edit_tenant_id.strip() if edit_tenant_id.strip() else None
+                                        bot = create_teams_bot(
+                                            edit_app_id.strip(), 
+                                            new_password, 
+                                            tenant_id, 
+                                            edit_name.strip() or None, 
+                                            config['id']
+                                        )
+                                        if bot.test_connection():
+                                            st.success("✅ 配置已更新！")
+                                            st.session_state.editing_teams_id = None
+                                            st.rerun()
+                                        else:
+                                            st.error("❌ 连接测试失败，请检查配置")
+                                    else:
+                                        st.warning("⚠️ App ID和Password不能为空")
+                                except Exception as e:
+                                    st.error(f"❌ 更新失败: {e}")
+                                    import traceback
+                                    st.code(traceback.format_exc())
+                        
+                        with col_cancel:
+                            if st.button("取消", key=f"cancel_edit_teams_{config['id']}"):
+                                st.session_state.editing_teams_id = None
+                                st.rerun()
+                    else:
+                        if st.button("✏️ 编辑", key=f"edit_teams_{config['id']}"):
+                            st.session_state.editing_teams_id = config['id']
+                            st.rerun()
+                
+                with col2:
+                    if st.button("🗑️ 删除", key=f"delete_teams_{config['id']}"):
+                        conn = db.get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM frontend_integrations WHERE id = ?", (config['id'],))
+                        conn.commit()
+                        conn.close()
+                        st.success("已删除")
+                        if st.session_state.editing_teams_id == config['id']:
+                            st.session_state.editing_teams_id = None
+                        st.rerun()
+    else:
+        st.info("暂无Teams Bot配置")
+    
+    # 添加新Teams Bot
+    with st.expander("➕ 添加新的Teams Bot"):
+        teams_name = st.text_input("Bot名称（可选）", key="teams_name", value="")
+        teams_app_id = st.text_input(
+            "Teams App ID",
+            key="teams_app_id",
+            help="从Azure Portal获取的App ID"
+        )
+        teams_app_password = st.text_input(
+            "Teams App Password", 
+            type="password",
+            key="teams_app_password",
+            help="从Azure Portal获取的App Password（客户端密码）"
+        )
+        teams_tenant_id = st.text_input(
+            "Tenant ID（单租户Bot必需）",
+            key="teams_tenant_id",
+            help="从Azure Portal → App注册 → 概述 → Directory (tenant) ID获取"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("保存并连接", key="save_teams"):
+                if teams_app_id and teams_app_password:
+                    try:
+                        name = teams_name.strip() if teams_name.strip() else None
+                        tenant_id = teams_tenant_id if teams_tenant_id.strip() else None
+                        bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id, name)
+                        if bot.test_connection():
+                            st.success("✅ Teams Bot连接成功并已保存配置！")
+                            st.rerun()
+                        else:
+                            st.error("❌ 连接失败，请检查配置")
+                    except Exception as e:
+                        st.error(f"❌ 连接失败: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                else:
+                    st.warning("⚠️ 请输入App ID和Password")
+        
+        with col2:
+            if st.button("测试连接", key="test_teams"):
+                if teams_app_id and teams_app_password:
+                    try:
+                        tenant_id = teams_tenant_id if teams_tenant_id.strip() else None
+                        # 测试连接时不保存配置（save=False）
+                        bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id, save=False)
+                        if bot.test_connection():
                             st.success("✅ 连接测试成功！")
-                    else:
-                        st.error("❌ 连接测试失败")
-                except Exception as e:
-                    st.error(f"❌ 测试失败: {e}")
-                    import traceback
-                    st.code(traceback.format_exc())
-            else:
-                st.warning("⚠️ 请输入Token进行测试")
+                        else:
+                            st.error("❌ 连接测试失败")
+                    except Exception as e:
+                        st.error(f"❌ 测试失败: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                else:
+                    st.warning("⚠️ 请输入配置进行测试")
     
     st.divider()
     
-    # Teams集成
-    st.subheader("Microsoft Teams Bot")
-    
-    # 显示当前配置
-    if teams_config:
-        st.info(f"✅ 当前已配置（状态: {teams_config['status']}）")
-        config = teams_config.get('config', {})
-        if config.get('app_id'):
-            st.caption(f"App ID: {config['app_id']}")
-        if teams_config.get('api_key_hash'):
-            st.caption(f"Password哈希: ...{teams_config['api_key_hash']}")
-    
-    teams_app_id = st.text_input(
-        "Teams App ID",
-        value=teams_config.get('config', {}).get('app_id', '') if teams_config else '',
-        help="从Azure Portal获取的App ID"
-    )
-    teams_app_password = st.text_input(
-        "Teams App Password", 
-        type="password",
-        value="",  # 不显示已保存的password
-        help="从Azure Portal获取的App Password（客户端密码）"
-    )
-    teams_tenant_id = st.text_input(
-        "Tenant ID（单租户Bot必需）",
-        value=teams_config.get('config', {}).get('tenant_id', '') if teams_config else '',
-        help="从Azure Portal → App注册 → 概述 → Directory (tenant) ID获取"
-    )
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("保存并连接Teams"):
-            if teams_app_id and teams_app_password:
-                try:
-                    tenant_id = teams_tenant_id if teams_tenant_id else None
-                    bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id)
-                    if bot.test_connection():
-                        st.success("✅ Teams Bot连接成功并已保存配置！")
-                        st.rerun()  # 刷新页面显示新配置
-                    else:
-                        st.error("❌ 连接失败，请检查配置")
-                except Exception as e:
-                    st.error(f"❌ 连接失败: {e}")
-            else:
-                st.warning("⚠️ 请输入App ID和Password")
-    
-    with col2:
-        if st.button("测试Teams连接"):
-            if teams_app_id and teams_app_password:
-                try:
-                    tenant_id = teams_tenant_id if teams_tenant_id else None
-                    bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id)
-                    if bot.test_connection():
-                        st.success("✅ 连接测试成功！")
-                    else:
-                        st.error("❌ 连接测试失败")
-                except Exception as e:
-                    st.error(f"❌ 测试失败: {e}")
-            else:
-                st.warning("⚠️ 请输入配置进行测试")
-    
-    st.divider()
-    
-    # 集成状态
-    st.subheader("集成状态")
+    # 集成状态总览
+    st.subheader("集成状态总览")
     try:
         conn = db.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM frontend_integrations ORDER BY updated_at DESC")
+        cursor.execute("SELECT * FROM frontend_integrations ORDER BY frontend_type, updated_at DESC")
         rows = cursor.fetchall()
         conn.close()
         
         if rows:
-            for row in rows:
-                status_color = "🟢" if row["status"] == "connected" else "🔴"
-                updated_time = row["updated_at"] if row["updated_at"] else "未知"
-                st.write(f"{status_color} **{row['frontend_type']}**: {row['status']} (更新于: {updated_time})")
+            # 按类型分组显示
+            telegram_bots = [r for r in rows if r['frontend_type'] == 'telegram']
+            teams_bots = [r for r in rows if r['frontend_type'] == 'teams']
+            
+            if telegram_bots:
+                st.write("**Telegram Bot:**")
+                for row in telegram_bots:
+                    status_color = "🟢" if row["status"] == "connected" else "🔴"
+                    name = row["name"] if row["name"] else "default"
+                    updated_time = utc_to_beijing(row["updated_at"]) if row["updated_at"] else "未知"
+                    st.write(f"{status_color} {name}: {row['status']} (更新于: {updated_time})")
+            
+            if teams_bots:
+                st.write("**Teams Bot:**")
+                for row in teams_bots:
+                    status_color = "🟢" if row["status"] == "connected" else "🔴"
+                    name = row["name"] if row["name"] else "default"
+                    updated_time = utc_to_beijing(row["updated_at"]) if row["updated_at"] else "未知"
+                    st.write(f"{status_color} {name}: {row['status']} (更新于: {updated_time})")
         else:
             st.info("暂无集成配置")
     except Exception as e:
@@ -327,19 +605,64 @@ def kb_management_page():
         conn.close()
         
         if rows:
-            df = pd.DataFrame([
-                {
-                    "ID": row["id"],
-                    "文件名": row["filename"],
-                    "格式": row["file_format"],
-                    "大小": f"{row['file_size']/1024:.1f} KB" if row['file_size'] else "0 KB",
-                    "状态": row["status"],
-                    "意图空间": row["intent_space_name"] if row["intent_space_name"] else "未分配",
-                    "上传时间": row["upload_date"]
-                }
-                for row in rows
-            ])
-            st.dataframe(df, use_container_width=True)
+            # 使用 expander 展示文档列表，风格与意图空间配置页面保持一致
+            for row in rows:
+                # 根据文件格式选择图标
+                format_icon = "📄"
+                if row["file_format"].lower() == "pdf":
+                    format_icon = "📕"
+                elif row["file_format"].lower() in ["doc", "docx"]:
+                    format_icon = "📘"
+                
+                # 状态图标
+                status_icon = "⏳"
+                if row["status"] == "processed":
+                    status_icon = "✅"
+                elif row["status"] == "error":
+                    status_icon = "❌"
+                
+                # 意图空间图标
+                intent_icon = "📁"
+                if row["intent_space_name"]:
+                    intent_icon = "📂"
+                
+                # 构建标题
+                title = f"{format_icon} {row['filename']}"
+                if row["intent_space_name"]:
+                    title += f" - {intent_icon} {row['intent_space_name']}"
+                
+                with st.expander(title):
+                    col1, col2 = st.columns([3, 1])
+                    
+                    with col1:
+                        st.write(f"**ID**: {row['id']}")
+                        st.write(f"**格式**: {row['file_format']}")
+                        st.write(f"**大小**: {row['file_size']/1024:.1f} KB" if row['file_size'] else "**大小**: 0 KB")
+                        st.write(f"**状态**: {status_icon} {row['status']}")
+                        st.write(f"**意图空间**: {intent_icon} {row['intent_space_name'] if row['intent_space_name'] else '未分配'}")
+                        st.write(f"**上传时间**: 🕒 {utc_to_beijing(row['upload_date']) if row['upload_date'] else '未知'}")
+                    
+                    with col2:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("🗑️ 删除", key=f"delete_doc_{row['id']}", type="primary", use_container_width=True):
+                            try:
+                                if requests:
+                                    with st.spinner("正在删除..."):
+                                        response = requests.delete(f"http://localhost:8000/api/documents/{row['id']}")
+                                        if response.status_code == 200:
+                                            st.success(f"✅ 文档已删除")
+                                            st.rerun()
+                                        else:
+                                            error_detail = "未知错误"
+                                            try:
+                                                error_detail = response.json().get('detail', '未知错误')
+                                            except:
+                                                pass
+                                            st.error(f"❌ 删除失败: {error_detail}")
+                                else:
+                                    st.error("❌ requests库未安装，无法删除文档")
+                            except Exception as e:
+                                st.error(f"❌ 删除失败: {e}")
         else:
             st.info("暂无文档")
     except Exception as e:
@@ -388,30 +711,58 @@ def intent_configuration_page():
         if rows:
             for row in rows:
                 with st.expander(f"📁 {row['name']}"):
-                    st.write(f"**描述**: {row['description'] or '无描述'}")
-                    st.write(f"**关键词**: {row['keywords'] or '无关键词'}")
+                    col1, col2 = st.columns([3, 1])
                     
-                    # 查询分类日志
-                    try:
-                        conn_logs = db.get_connection()
-                        cursor_logs = conn_logs.cursor()
-                        cursor_logs.execute("""
-                            SELECT detected_intent, confidence, COUNT(*) as count
-                            FROM query_history
-                            WHERE detected_intent = ?
-                            GROUP BY detected_intent, confidence
-                        """, (row['name'],))
-                        logs = cursor_logs.fetchall()
-                        conn_logs.close()
+                    with col1:
+                        st.write(f"**描述**: {row['description'] or '无描述'}")
+                        st.write(f"**关键词**: {row['keywords'] or '无关键词'}")
                         
-                        if logs:
-                            st.write("**分类统计**:")
-                            for log in logs:
-                                st.write(f"- 置信度 {log['confidence']:.2f}: {log['count']} 次查询")
-                        else:
-                            st.write("*暂无查询统计*")
-                    except Exception as e:
-                        st.write(f"*无法加载统计信息: {e}*")
+                        # 查询分类日志
+                        try:
+                            conn_logs = db.get_connection()
+                            cursor_logs = conn_logs.cursor()
+                            cursor_logs.execute("""
+                                SELECT detected_intent, confidence, COUNT(*) as count
+                                FROM query_history
+                                WHERE detected_intent = ?
+                                GROUP BY detected_intent, confidence
+                            """, (row['name'],))
+                            logs = cursor_logs.fetchall()
+                            conn_logs.close()
+                            
+                            if logs:
+                                st.write("**分类统计**:")
+                                for log in logs:
+                                    st.write(f"- 置信度 {log['confidence']:.2f}: {log['count']} 次查询")
+                            else:
+                                st.write("*暂无查询统计*")
+                        except Exception as e:
+                            st.write(f"*无法加载统计信息: {e}*")
+                    
+                    with col2:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("🗑️ 删除", key=f"delete_intent_{row['id']}", type="primary", use_container_width=True):
+                            try:
+                                conn = db.get_connection()
+                                cursor = conn.cursor()
+                                
+                                # 检查是否有文档关联到此意图空间
+                                cursor.execute("SELECT COUNT(*) FROM documents WHERE intent_space_id = ?", (row['id'],))
+                                doc_count = cursor.fetchone()[0]
+                                
+                                if doc_count > 0:
+                                    st.warning(f"⚠️ 该意图空间关联了 {doc_count} 个文档，删除前请先处理这些文档。")
+                                else:
+                                    # 删除意图空间
+                                    cursor.execute("DELETE FROM intent_spaces WHERE id = ?", (row['id'],))
+                                    conn.commit()
+                                    conn.close()
+                                    st.success(f"✅ 意图空间 '{row['name']}' 已删除")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ 删除失败: {e}")
+                                if conn:
+                                    conn.close()
         else:
             st.info("暂无意图空间")
     except Exception as e:
@@ -425,17 +776,44 @@ def analytics_page():
     try:
         # 分类准确率
         st.subheader("分类准确率")
-        days = st.slider("时间范围（天）", 1, 30, 7)
-        accuracy_data = analytics.get_classification_accuracy(days)
         
-        col1, col2 = st.columns(2)
+        # 时间范围选择（按小时）
+        # 使用 session_state 确保值正确传递
+        if "accuracy_hours_value" not in st.session_state:
+            st.session_state.accuracy_hours_value = 24
+        
+        hours = st.slider(
+            "时间范围（小时）", 
+            min_value=1, 
+            max_value=168,  # 7天 = 168小时
+            value=st.session_state.accuracy_hours_value,  # 使用session_state的值
+            step=1,
+            key="accuracy_hours_slider",
+            help="选择要统计的时间范围（1-168小时，即1小时到7天）"
+        )
+        
+        # 更新session_state
+        st.session_state.accuracy_hours_value = hours
+        
+        # 直接调用，不使用缓存，确保时间范围变化时数据更新
+        # 注意：每次 slider 变化都会触发重新计算
+        # 确保 hours 是整数
+        try:
+            hours_int = int(hours)
+        except (ValueError, TypeError):
+            hours_int = 24
+        
+        accuracy_data = analytics.get_classification_accuracy(hours_int)
+        
+        col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("总查询数", accuracy_data.get("total_queries", 0))
+        with col2:
             avg_conf = accuracy_data.get("average_confidence", 0)
             st.metric("平均置信度", f"{avg_conf:.2f}")
-        with col2:
+        with col3:
             acc_rate = accuracy_data.get("accuracy_rate", 0)
-            st.metric("准确率", f"{acc_rate*100:.1f}%")
+            st.metric("高置信度比例", f"{acc_rate*100:.1f}%")
         
         # 查询历史
         st.subheader("查询历史")
@@ -487,22 +865,61 @@ def main():
     """主函数"""
     init_session_state()
     
-    # 侧边栏导航
+    # 侧边栏标题
     st.sidebar.title("IntelliKnow KMS")
-    page = st.sidebar.selectbox(
-        "选择页面",
-        ["仪表板", "前端集成", "知识库管理", "意图配置", "分析报告"]
-    )
+    st.sidebar.markdown("---")  # 分隔线
     
-    if page == "仪表板":
+    # 初始化session state中的当前页面
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = "📊 仪表板"
+    
+    # 侧边栏标签导航（使用按钮组，优化性能）
+    st.sidebar.markdown("### 导航菜单")
+    st.sidebar.markdown("")  # 空行增加间距
+    
+    # 使用按钮组，每个按钮独立一行（优化：使用唯一key避免重复渲染检查）
+    current = st.session_state.current_page
+    
+    # 定义页面列表
+    pages = [
+        ("📊 仪表板", "📊 仪表板"),
+        ("🔌 前端集成", "🔌 前端集成"),
+        ("📚 知识库管理", "📚 知识库管理"),
+        ("🎯 意图配置", "🎯 意图配置"),
+        ("📈 分析报告", "📈 分析报告")
+    ]
+    
+    # 渲染按钮（优化：只在点击时更新，避免每次渲染都检查状态）
+    for page_key, page_label in pages:
+        is_selected = (current == page_key)
+        button_type = "primary" if is_selected else "secondary"
+        
+        if st.sidebar.button(
+            page_label, 
+            use_container_width=True,
+            type=button_type,
+            key=f"nav_btn_{page_key}"  # 使用唯一key避免重复渲染
+        ):
+            if current != page_key:
+                st.session_state.current_page = page_key
+                st.rerun()
+        
+        st.sidebar.markdown("")  # 空行增加间距
+    
+    st.sidebar.markdown("")  # 空行增加间距
+    
+    st.sidebar.markdown("---")  # 底部分隔线
+    
+    # 根据选择的页面显示对应内容
+    if st.session_state.current_page == "📊 仪表板":
         main_dashboard()
-    elif page == "前端集成":
+    elif st.session_state.current_page == "🔌 前端集成":
         frontend_integration_page()
-    elif page == "知识库管理":
+    elif st.session_state.current_page == "📚 知识库管理":
         kb_management_page()
-    elif page == "意图配置":
+    elif st.session_state.current_page == "🎯 意图配置":
         intent_configuration_page()
-    elif page == "分析报告":
+    elif st.session_state.current_page == "📈 分析报告":
         analytics_page()
 
 

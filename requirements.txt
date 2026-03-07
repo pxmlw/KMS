@@ -25,6 +25,7 @@ botbuilder-schema>=4.15.0
 streamlit>=1.29.0
 plotly>=5.18.0
 pandas>=2.1.0
+streamlit-aggrid>=0.3.4
 
 # 工具库
 python-dotenv>=1.0.0

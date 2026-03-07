@@ -29,7 +29,7 @@
 
 - Python 3.8+
 - pip 或 pip3
-- **部署 Teams Bot 时需要**：Cloudflare Tunnel 或 ngrok（用于暴露本地服务到公网）
+- **部署 Teams Bot 时需要**：Cloudflare Tunnel（`brew install cloudflared`）或 ngrok（用于暴露本地服务到公网）
 
 ## 🚀 快速开始
 
@@ -40,7 +40,9 @@ git clone https://github.com/pxmlw/KMS.git
 cd KMS
 ```
 
-### 2. 创建虚拟环境
+### 2. 创建虚拟环境（必需）
+
+**重要**：macOS（特别是使用 Homebrew 安装的 Python）不允许直接安装包到系统 Python，**必须使用虚拟环境**。
 
 ```bash
 python3 -m venv venv
@@ -49,45 +51,91 @@ source venv/bin/activate  # macOS/Linux
 venv\Scripts\activate  # Windows
 ```
 
+激活虚拟环境后，命令提示符前会显示 `(venv)`。
+
 ### 3. 安装依赖
 
+**必须在虚拟环境中安装依赖**：
+
 ```bash
+# 确保虚拟环境已激活（看到 (venv) 前缀）
 pip install -r requirements.txt
 ```
 
+**注意**：如果遇到 `externally-managed-environment` 错误，说明你尝试在系统 Python 中安装，请先创建并激活虚拟环境。
+
 ### 4. 配置环境变量
 
-创建 `.env` 文件（参考 `.env.example`）：
+复制 `.env.example` 为 `.env` 并填写配置：
 
-```env
-# OpenRouter API配置
-OPENROUTER_API_KEY=your_openrouter_api_key
-OPENROUTER_MODEL=deepseek/deepseek-chat
-
-# Telegram Bot配置（可选）
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-
-# Teams Bot配置（可选）
-TEAMS_APP_ID=your_teams_app_id
-TEAMS_APP_PASSWORD=your_teams_app_password
-TEAMS_TENANT_ID=your_tenant_id
+```bash
+cp .env.example .env
+# 编辑 .env，至少配置 OPENROUTER_API_KEY
 ```
+
+**必需配置**（OpenRouter 用于意图分类和 AI 回复）：
+- `OPENROUTER_API_KEY`：从 [OpenRouter](https://openrouter.ai/) 获取
+- `OPENROUTER_MODEL`：默认 `deepseek/deepseek-chat`
+
+**可选配置**（也可在管理界面「前端集成」中配置 Bot）：
+- `TELEGRAM_BOT_TOKEN`、`TEAMS_APP_ID`、`TEAMS_APP_PASSWORD`、`TEAMS_TENANT_ID`
 
 ### 5. 启动服务
 
-#### 启动 API 服务
+**重要**：**必须使用虚拟环境**（macOS 系统 Python 不允许直接安装包）
+
+#### 方式1：一键启动所有服务（推荐）
 
 ```bash
+# 1. 确保虚拟环境已激活
+source venv/bin/activate
+
+# 2. 一键启动所有服务
+./start_all.sh
+```
+
+启动脚本会按顺序启动：
+1. FastAPI 主服务（`http://localhost:8000`）
+2. Streamlit 管理界面（`http://localhost:8501`）
+3. Telegram Bot 服务（如已配置）
+4. Cloudflare Tunnel（**启动前会询问**是否启动，用于 Teams Bot）
+
+**单独管理服务**：
+```bash
+./start_all.sh status              # 查看服务状态
+./start_all.sh restart fastapi     # 重启 FastAPI
+./start_all.sh restart streamlit   # 重启 Streamlit
+./start_all.sh restart telegram    # 重启 Telegram Bot
+./start_all.sh restart tunnel      # 重启 Cloudflare Tunnel
+./start_all.sh stop streamlit      # 停止指定服务
+./start_all.sh start streamlit    # 启动指定服务
+```
+
+首次使用需赋予执行权限：`chmod +x start_all.sh`
+
+#### 方式2：分别启动各个服务
+
+**启动 API 服务**：
+```bash
+# 1. 确保虚拟环境已激活（看到 (venv) 前缀）
+source venv/bin/activate
+
+# 2. 启动服务
 python main.py
 # 或
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
+如果未激活虚拟环境，会提示 `ModuleNotFoundError`。
+
 API 服务将在 `http://localhost:8000` 启动。
 
-#### 启动管理界面
-
+**启动管理界面**：
 ```bash
+# 1. 确保虚拟环境已激活
+source venv/bin/activate
+
+# 2. 启动管理界面
 python run_admin.py
 # 或
 streamlit run app/admin/dashboard.py
@@ -95,12 +143,13 @@ streamlit run app/admin/dashboard.py
 
 管理界面将在 `http://localhost:8501` 启动。
 
-#### 启动 Telegram Bot（如已配置）
-
+**启动 Telegram Bot**（如已配置）：
 ```bash
-./start_telegram.sh
-# 或
-python start_telegram_bot.py
+# 1. 激活虚拟环境（如果使用虚拟环境）
+source venv/bin/activate
+
+# 2. 启动Bot
+python3 start_telegram_bot.py
 ```
 
 ## 📖 使用指南
@@ -111,9 +160,13 @@ python start_telegram_bot.py
 
 1. **仪表板**：查看系统统计和查询历史
 2. **前端集成**：配置 Teams Bot 和 Telegram Bot
-3. **知识库管理**：上传和管理文档
-4. **意图配置**：创建和管理意图空间（HR、法律、财务等）
-5. **分析报告**：查看查询统计和准确率
+   - 支持多个 Bot 实例管理
+   - 实时连接状态检测
+   - Webhook URL 自动保存和显示（Cloudflare Tunnel）
+   - Bot 配置的增删改查
+3. **知识库管理**：上传、删除文档，关联意图空间
+4. **意图配置**：创建、删除意图空间（HR、法律、财务等），配置描述和关键词
+5. **分析报告**：查看查询统计、分类准确率、知识库使用情况
 
 ### 上传文档
 
@@ -129,20 +182,22 @@ python start_telegram_bot.py
 3. 在管理界面"前端集成"页面配置
 4. **暴露 API 服务**（使用 Cloudflare Tunnel 或 ngrok）：
    
-   **使用 Cloudflare Tunnel（推荐）**：
+   **使用 Cloudflare Tunnel（推荐，支持自动保存 URL）**：
    ```bash
    # 安装 cloudflared（如果未安装）
    # macOS: brew install cloudflared
    # Linux: 从 https://github.com/cloudflare/cloudflared/releases 下载
    
-   # 创建隧道（首次使用）
-   cloudflared tunnel create kms-tunnel
+   # 方式1：使用自动保存 URL 的启动脚本（推荐）
+   python3 start_tunnel_with_save.py
    
-   # 运行隧道（将本地8000端口暴露到公网）
+   # 方式2：手动启动（需要手动复制 URL）
    cloudflared tunnel --url http://localhost:8000
    ```
    
    运行后会显示一个公网URL，例如：`https://xxxxx.trycloudflare.com`
+   
+   **注意**：使用 `start_tunnel_with_save.py` 启动时，URL 会自动保存到数据库，并在管理界面显示。
    
    **或使用 ngrok**：
    ```bash
@@ -161,17 +216,25 @@ python start_telegram_bot.py
 5. 设置 Teams Bot 的 Messaging Endpoint：
    - Cloudflare Tunnel: `https://xxxxx.trycloudflare.com/api/teams/messages`
    - ngrok: `https://xxxxx.ngrok.io/api/teams/messages`
+   
+   **提示**：如果使用 `start_tunnel_with_save.py` 启动 Tunnel，完整 Webhook URL 会自动显示在管理界面的"前端集成"页面，可以直接复制使用。
 
-6. 确保 API 服务正在运行（`python main.py`）
+6. 确保 API 服务正在运行（`python main.py` 或使用一键启动脚本）
 
 ### 配置 Telegram Bot
 
 1. 在 Telegram 中联系 @BotFather 创建 Bot
 2. 获取 Bot Token
 3. 在管理界面"前端集成"页面配置 Token
-4. 运行 `./start_telegram.sh` 启动 Bot 服务
+4. 运行 `python3 start_telegram_bot.py` 启动 Bot 服务
 
 ### API 使用示例
+
+#### 健康检查
+
+```bash
+curl http://localhost:8000/health
+```
 
 #### 查询知识库
 
@@ -195,7 +258,7 @@ curl -X POST "http://localhost:8000/api/documents/upload" \
 ## 📁 项目结构
 
 ```
-fastapi-webapp/
+KMS/                    # 或 fastapi-webapp/（项目根目录）
 ├── app/
 │   ├── admin/              # Streamlit 管理界面
 │   │   └── dashboard.py
@@ -209,19 +272,25 @@ fastapi-webapp/
 │   │   └── database.py
 │   ├── services/           # 业务逻辑
 │   │   ├── analytics.py    # 分析服务
+│   │   ├── bot_monitor.py  # Bot 连接监控
 │   │   ├── document_parser.py # 文档解析
 │   │   ├── knowledge_base.py  # 知识库
 │   │   └── orchestrator.py   # 意图分类
-│   └── config.py           # 配置
+│   ├── utils/              # 工具函数
+│   │   └── tunnel_url_saver.py # Tunnel URL 保存工具
+│   └── config.py           # 应用配置
 ├── data/                   # 数据目录
 │   ├── documents/         # 上传的文档
 │   └── kb/                # 知识库索引
+├── logs/                   # 日志目录（自动创建，含 fastapi.log、streamlit.log 等）
 ├── main.py                 # FastAPI 应用入口
 ├── run_admin.py           # 管理界面启动脚本
+├── start_all.sh           # 一键启动所有服务（Shell脚本）
 ├── start_telegram_bot.py  # Telegram Bot 启动脚本
-├── start_telegram.sh      # Telegram Bot 便捷启动脚本
+├── start_tunnel_with_save.py # Cloudflare Tunnel 启动脚本（自动保存URL）
+├── .env.example           # 环境变量示例（复制为 .env 并填写）
 ├── requirements.txt       # Python 依赖
-└── README.md             # 本文件
+└── README.md              # 本文件
 ```
 
 ## 🔧 配置说明
@@ -245,11 +314,48 @@ fastapi-webapp/
 
 ## 🐛 故障排查
 
+### 服务无法启动 / ModuleNotFoundError / externally-managed-environment
+
+**问题1**：运行 `python3 main.py` 时提示 `ModuleNotFoundError: No module named 'fastapi'`
+
+**解决方案**：必须使用虚拟环境：
+```bash
+# 1. 创建虚拟环境（如果还没有）
+python3 -m venv venv
+
+# 2. 激活虚拟环境
+source venv/bin/activate
+
+# 3. 安装依赖
+pip install -r requirements.txt
+
+# 4. 启动服务
+python main.py
+```
+
+**问题2**：运行 `pip3 install -r requirements.txt` 时提示 `externally-managed-environment`
+
+**原因**：macOS（Homebrew Python）不允许直接安装包到系统 Python。
+
+**解决方案**：必须使用虚拟环境（同上）。
+
+**检查虚拟环境是否激活**：
+- 命令提示符前应该显示 `(venv)`
+- 或运行：`which python` 应该显示 `.../venv/bin/python`
+
+**检查依赖安装情况**：
+```bash
+# 在虚拟环境中运行
+source venv/bin/activate
+python -c "import fastapi, uvicorn, streamlit; print('核心依赖已安装')"
+```
+
 ### Telegram Bot 无法启动
 
-- 检查 Token 是否正确配置
-- 确保虚拟环境已激活
-- 检查网络连接
+- 检查 Token 是否正确配置（管理界面或 .env）
+- 确保 `start_telegram_bot.py` 或 `start_all.sh` 已启动 Telegram 服务
+- 确保依赖已安装（虚拟环境）
+- 检查网络连接（Telegram API 需可访问）
 
 ### Teams Bot 连接失败
 
@@ -259,12 +365,15 @@ fastapi-webapp/
 - **确保 Cloudflare Tunnel 或 ngrok 正在运行**
 - 验证隧道URL是否正确配置到 Azure Bot Service
 - 检查本地 API 服务是否在运行（`http://localhost:8000`）
+- **使用 `start_tunnel_with_save.py` 启动 Tunnel 时，URL 会自动保存并在管理界面显示**
+- 如果 Tunnel URL 变化，需要重新在 Azure Portal 中配置 Messaging Endpoint
 
 ### 文档无法搜索
 
-- 确认文档已成功上传
-- 检查文档是否关联了正确的意图空间
-- 查看 API 日志了解错误信息
+- 确认文档已成功上传且状态为「已处理」
+- 检查文档是否关联了正确的意图空间（未关联则匹配所有查询）
+- 查询内容需与意图空间描述/关键词或文档内容相关
+- 查看 API 日志：`tail -f logs/fastapi.log`
 
 ## 📝 开发说明
 
@@ -276,7 +385,7 @@ fastapi-webapp/
 
 ### 扩展意图分类
 
-修改 `app/services/orchestrator.py` 中的分类逻辑和关键词配置。
+意图空间和关键词在管理界面「意图配置」中维护，系统会动态加载，**无需修改代码**。如需自定义分类逻辑，可修改 `app/services/orchestrator.py`。
 
 ## 📄 许可证
 
