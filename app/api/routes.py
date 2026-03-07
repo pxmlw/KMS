@@ -302,20 +302,10 @@ async def teams_messages(request: Request):
         
         # 获取认证头
         auth_header = request.headers.get("Authorization", "")
-        print(f"DEBUG: Authorization header: {'已设置（长度: ' + str(len(auth_header)) + '）' if auth_header else '未设置'}")
-        print(f"DEBUG: Authorization header前20字符: {auth_header[:20] if auth_header else 'None'}...")
-        
-        # 打印所有请求头（调试用）
-        print(f"DEBUG: 请求头:")
-        for key, value in request.headers.items():
-            if key.lower() in ['authorization', 'content-type', 'user-agent']:
-                print(f"  {key}: {value[:50] if len(str(value)) > 50 else value}...")
         
         # 获取请求体
         try:
             body = await request.json()
-            print(f"DEBUG: 请求体类型: {body.get('type', 'unknown') if isinstance(body, dict) else 'not dict'}")
-            print(f"DEBUG: 请求体serviceUrl: {body.get('serviceUrl', 'N/A') if isinstance(body, dict) else 'N/A'}")
         except Exception as e:
             print(f"ERROR: 无法解析请求体: {e}")
             return JSONResponse(
@@ -337,66 +327,15 @@ async def teams_messages(request: Request):
         # 处理消息并生成响应
         async def process_turn(turn_context):
             try:
-                print(f"DEBUG: process_turn开始处理")
-                print(f"DEBUG: turn_context.activity.type: {turn_context.activity.type if hasattr(turn_context, 'activity') else 'N/A'}")
-                if hasattr(turn_context, 'activity'):
-                    act = turn_context.activity
-                    print(f"DEBUG: activity.service_url: {getattr(act, 'service_url', 'N/A')}")
-                    print(f"DEBUG: activity.channel_id: {getattr(act, 'channel_id', 'N/A')}")
-                    print(f"DEBUG: activity.conversation.id: {getattr(getattr(act, 'conversation', None), 'id', 'N/A') if hasattr(act, 'conversation') else 'N/A'}")
-                
-                # 检查适配器的credentials
-                if teams_bot.adapter:
-                    try:
-                        if hasattr(teams_bot.adapter, '_credentials'):
-                            creds = teams_bot.adapter._credentials
-                            print(f"DEBUG: Adapter._credentials: {type(creds)}")
-                            if creds:
-                                print(f"DEBUG: Credentials.app_id: {getattr(creds, 'app_id', 'N/A')}")
-                    except Exception as e:
-                        print(f"DEBUG: 检查credentials时出错: {e}")
-                
                 response_activity = await teams_bot.handle_message(activity)
                 if response_activity:
-                    print(f"DEBUG: 准备发送响应，响应文本长度: {len(response_activity.text) if response_activity.text else 0}")
-                    print(f"DEBUG: 调用turn_context.send_activity...")
                     await turn_context.send_activity(response_activity)
-                    print(f"DEBUG: 响应已发送成功")
             except Exception as e:
                 import traceback
                 print(f"ERROR: 处理消息时出错: {e}")
                 print(f"ERROR: 错误类型: {type(e).__name__}")
                 
-                # 检查是否是认证错误
-                error_str = str(e)
-                if "access token" in error_str.lower() or "unauthorized" in error_str.lower() or "AADSTS" in error_str:
-                    print(f"\n" + "="*60)
-                    print(f"DEBUG: 认证错误详情分析:")
-                    print(f"="*60)
-                    print(f"错误信息: {error_str}")
-                    print(f"\n配置检查:")
-                    print(f"  App ID: {teams_bot.app_id}")
-                    print(f"  App Password: {'已设置（长度: ' + str(len(teams_bot.app_password)) + '）' if teams_bot.app_password else '未设置'}")
-                    print(f"  Adapter: {'已初始化' if teams_bot.adapter else '未初始化'}")
-                    
-                    if teams_bot.adapter:
-                        try:
-                            if hasattr(teams_bot.adapter, '_credentials'):
-                                creds = teams_bot.adapter._credentials
-                                print(f"  Adapter._credentials: {creds}")
-                                if creds:
-                                    print(f"  Credentials.app_id: {getattr(creds, 'app_id', 'N/A')}")
-                        except:
-                            pass
-                    
-                    print(f"\n可能的原因:")
-                    print(f"  1. App注册的App ID与Bot资源的Microsoft App ID不匹配")
-                    print(f"  2. App注册的客户端密码与Bot资源的App Password不匹配")
-                    print(f"  3. App注册不是单租户类型")
-                    print(f"  4. Bot资源不是单租户类型")
-                    print(f"="*60)
-                
-                print(f"\n完整错误堆栈:")
+                # 记录错误堆栈
                 traceback.print_exc()
                 
                 # 发送错误消息给用户
@@ -415,35 +354,24 @@ async def teams_messages(request: Request):
         # process_activity(req, auth_header: str, logic: Callable)
         # 根据方法签名检查，参数顺序是：req, auth_header, logic
         # 但FastAPI的Request对象可能不兼容，尝试两种方式
-        print(f"DEBUG: 准备调用process_activity")
-        print(f"DEBUG: auth_header长度: {len(auth_header)}")
-        print(f"DEBUG: activity.type: {activity.type if hasattr(activity, 'type') else 'N/A'}")
-        
         try:
             # 方式1：按照官方签名 (req, auth_header, logic)
-            print(f"DEBUG: 尝试方式1: (request, auth_header, logic)")
             await teams_bot.adapter.process_activity(
                 request,      # FastAPI Request对象
                 auth_header,  # 认证头字符串
                 process_turn  # 处理函数
             )
-            print(f"DEBUG: 方式1成功")
-        except TypeError as e:
+        except TypeError:
             # 如果方式1失败（可能是Request对象类型不兼容），尝试方式2
-            print(f"DEBUG: 方式1失败（Request对象类型不兼容），尝试方式2: {e}")
             try:
                 # 方式2：按照Medium文章示例 (activity, auth_header, logic)
                 # 某些版本可能接受Activity作为第一个参数
-                print(f"DEBUG: 尝试方式2: (activity, auth_header, logic)")
                 await teams_bot.adapter.process_activity(
                     activity,      # Activity对象
                     auth_header,   # 认证头字符串
                     process_turn   # 处理函数
                 )
-                print(f"DEBUG: 方式2成功")
             except Exception as e2:
-                print(f"DEBUG: 方式2也失败: {e2}")
-                print(f"DEBUG: 方式2错误类型: {type(e2).__name__}")
                 import traceback
                 traceback.print_exc()
                 raise e2

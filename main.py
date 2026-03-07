@@ -23,8 +23,6 @@ _no_proxy_list.extend(_microsoft_online_domains)
 os.environ['NO_PROXY'] = ','.join(set(_no_proxy_list))
 os.environ['no_proxy'] = os.environ['NO_PROXY']  # 确保小写版本也设置
 
-print(f"DEBUG: NO_PROXY已配置: {os.environ.get('NO_PROXY')}")
-
 # 导入API路由
 from app.api.routes import router as api_router
 

@@ -34,11 +34,6 @@ class TeamsBotIntegration(FrontendIntegration):
         # 初始化Bot Framework适配器
         # 单租户Bot必须设置channel_auth_tenant
         if BotFrameworkAdapter and self.app_id and self.app_password:
-            print(f"DEBUG: 初始化Bot Framework适配器")
-            print(f"DEBUG: App ID: {self.app_id}")
-            print(f"DEBUG: App Password: {'已设置（长度: ' + str(len(self.app_password)) + '）' if self.app_password else '未设置'}")
-            print(f"DEBUG: Tenant ID: {self.tenant_id or '未设置（多租户模式）'}")
-            
             # 创建Settings，如果是单租户则设置channel_auth_tenant
             settings_params = {
                 "app_id": self.app_id,
@@ -48,24 +43,14 @@ class TeamsBotIntegration(FrontendIntegration):
             # 如果是单租户Bot，设置channel_auth_tenant
             if self.tenant_id and self.tenant_id != "你的租户ID":
                 settings_params["channel_auth_tenant"] = self.tenant_id
-                print(f"DEBUG: 使用单租户模式，channel_auth_tenant: {self.tenant_id}")
-            else:
-                print(f"DEBUG: 使用多租户模式（未设置tenant_id）")
             
             settings = BotFrameworkAdapterSettings(**settings_params)
-            
-            print(f"DEBUG: BotFrameworkAdapterSettings创建成功")
-            print(f"DEBUG: Settings.app_id: {settings.app_id}")
-            if hasattr(settings, 'channel_auth_tenant'):
-                print(f"DEBUG: Settings.channel_auth_tenant: {getattr(settings, 'channel_auth_tenant', 'N/A')}")
             
             # 配置MSAL使用无代理的HTTP客户端（如果可能）
             # 注意：Bot Framework适配器内部使用MSAL，我们需要通过环境变量控制代理
             # NO_PROXY已在main.py中设置，这里确保MSAL能正确读取
             
             self.adapter = BotFrameworkAdapter(settings)
-            print(f"DEBUG: Bot Framework适配器已初始化")
-            print(f"DEBUG: 当前NO_PROXY: {os.environ.get('NO_PROXY', '未设置')}")
             
             # 注意：credentials会在实际使用时自动初始化，oauth_endpoint会根据channel_auth_tenant设置
             # MSAL会读取NO_PROXY环境变量来绕过代理
@@ -86,16 +71,12 @@ class TeamsBotIntegration(FrontendIntegration):
             return None
             
         if activity.type != ActivityTypes.message:
-            print(f"DEBUG: 忽略非消息类型的Activity: {activity.type}")
             return None
         
         # 提取查询文本
         query = activity.text.strip() if activity.text else ""
         if not query:
-            print("DEBUG: 查询文本为空")
             return None
-        
-        print(f"DEBUG: 收到Teams消息: {query}")
         
         # 提取用户ID
         user_id = "unknown"
@@ -200,9 +181,6 @@ def get_teams_bot() -> Optional[TeamsBotIntegration]:
             
             if app_id and app_password:
                 _teams_bot_instance = TeamsBotIntegration(app_id, app_password, tenant_id)
-                print(f"DEBUG: Teams Bot实例已创建（从数据库配置），App ID: {app_id}, Tenant ID: {tenant_id or '未设置（多租户）'}")
-            else:
-                print("DEBUG: 数据库有配置但缺少App ID或Password")
         else:
             # 从环境变量读取
             app_id = os.getenv("TEAMS_APP_ID")
@@ -211,9 +189,6 @@ def get_teams_bot() -> Optional[TeamsBotIntegration]:
             
             if app_id and app_password:
                 _teams_bot_instance = TeamsBotIntegration(app_id, app_password, tenant_id)
-                print(f"DEBUG: Teams Bot实例已创建（从环境变量），App ID: {app_id}, Tenant ID: {tenant_id or '未设置（多租户）'}")
-            else:
-                print("DEBUG: Teams Bot未创建，因为环境变量未设置")
     return _teams_bot_instance
 
 
