@@ -55,8 +55,8 @@ class FrontendIntegration:
         conn.commit()
         conn.close()
     
-    def get_all_configs(self) -> List[Dict]:
-        """获取所有配置实例，并真正测试连接状态"""
+    def get_all_configs(self, verify_connection: bool = True) -> List[Dict]:
+        """获取所有配置实例。verify_connection=True 时真正测试连接并更新状态；False 时仅读库，加载更快。"""
         conn = db.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -71,38 +71,34 @@ class FrontendIntegration:
         result = []
         for row in rows:
             config = json.loads(row["config_data"]) if row["config_data"] else {}
-            # 真正验证连接状态（调用API测试）
-            # 设置默认值为False，确保任何异常都导致disconnected状态
-            is_connected = False
-            try:
-                is_connected = self._verify_bot_connection(config)
-            except Exception as e:
-                # 任何异常都视为连接失败
-                import traceback
-                traceback.print_exc()
+            if verify_connection:
+                # 真正验证连接状态（调用API测试）
                 is_connected = False
-            
-            actual_status = "connected" if is_connected else "disconnected"
-            
-            # 无论状态是否一致，都更新数据库和last_tested时间戳
-            # 这确保每次访问都会更新状态
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE frontend_integrations 
-                SET status = ?, last_tested = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (actual_status, row["id"]))
-            conn.commit()
-            conn.close()
+                try:
+                    is_connected = self._verify_bot_connection(config)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                actual_status = "connected" if is_connected else "disconnected"
+                conn = db.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE frontend_integrations 
+                    SET status = ?, last_tested = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (actual_status, row["id"]))
+                conn.commit()
+                conn.close()
+            else:
+                actual_status = row["status"] or "disconnected"
             
             result.append({
                 "id": row["id"],
                 "name": row["name"] or "default",
-                "status": actual_status,  # 使用实际测试的结果
+                "status": actual_status,
                 "config": config,
                 "api_key_hash": row["api_key_hash"],
-                "last_tested": datetime.now().isoformat(),  # 更新为当前时间
+                "last_tested": datetime.now().isoformat(),
                 "updated_at": row["updated_at"]
             })
         

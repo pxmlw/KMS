@@ -295,21 +295,6 @@ async def delete_document(doc_id: int):
         if conn:
             conn.close()
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
-    rows = cursor.fetchall()
-    conn.close()
-    
-    return [
-        {
-            "id": row["id"],
-            "filename": row["filename"],
-            "file_format": row["file_format"],
-            "file_size": row["file_size"],
-            "upload_date": row["upload_date"],
-            "status": row["status"],
-            "intent_space_id": row["intent_space_id"]
-        }
-        for row in rows
-    ]
 
 
 # 前端集成
@@ -467,10 +452,6 @@ async def teams_messages(request: Request):
         import traceback
         traceback.print_exc()
         return JSONResponse(
-            content={
-                "error": "处理Teams消息失败",
-                "message": str(e),
-                "traceback": error_trace
-            },
+            content={"error": "处理Teams消息失败", "message": str(e)},
             status_code=500
         )
