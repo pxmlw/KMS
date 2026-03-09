@@ -86,6 +86,8 @@ cp .env.example .env
 
 #### 方式1：一键启动所有服务（推荐）
 
+**macOS / Linux：**
+
 ```bash
 # 1. 确保虚拟环境已激活
 source venv/bin/activate
@@ -94,21 +96,33 @@ source venv/bin/activate
 ./start_all.sh
 ```
 
+**Windows（PowerShell）：**
+
+```powershell
+# 1. 激活虚拟环境
+.\venv\Scripts\activate
+
+# 2. 一键启动所有服务
+powershell -ExecutionPolicy Bypass -File .\start_all.ps1
+```
+
 启动脚本会按顺序启动：
 1. FastAPI 主服务（`http://localhost:8000`）
 2. Streamlit 管理界面（`http://localhost:8501`）
 3. Telegram Bot 服务（如已配置）
 4. Cloudflare Tunnel（**启动前会询问**是否启动，用于 Teams Bot）
 
-**单独管理服务**：
+**单独管理服务（macOS / Linux）：**
+
 ```bash
-./start_all.sh status              # 查看服务状态
-./start_all.sh restart fastapi     # 重启 FastAPI
-./start_all.sh restart streamlit   # 重启 Streamlit
-./start_all.sh restart telegram    # 重启 Telegram Bot
-./start_all.sh restart tunnel      # 重启 Cloudflare Tunnel
-./start_all.sh stop streamlit      # 停止指定服务
-./start_all.sh start streamlit    # 启动指定服务
+./start_all.sh fastapi          # 仅启动 FastAPI
+./start_all.sh streamlit        # 仅启动 Streamlit
+./start_all.sh telegram         # 仅启动 Telegram Bot
+./start_all.sh tunnel           # 仅启动 Cloudflare Tunnel
+
+./start_all.sh restart fastapi  # 重启 FastAPI
+./start_all.sh restart telegram # 重启 Telegram Bot
+./start_all.sh restart tunnel   # 重启 Cloudflare Tunnel
 ```
 
 首次使用需赋予执行权限：`chmod +x start_all.sh`
@@ -160,8 +174,8 @@ python3 start_telegram_bot.py
 
 1. **仪表板**：查看系统统计和查询历史
 2. **前端集成**：配置 Teams Bot 和 Telegram Bot
-   - 支持多个 Bot 实例管理
-   - 实时连接状态检测
+   - 每种前端仅支持一个在线 Bot 配置（可编辑/删除/更换）
+   - 实时连接状态检测（调用 Telegram / Teams 平台接口）
    - Webhook URL 自动保存和显示（Cloudflare Tunnel）
    - Bot 配置的增删改查
 3. **知识库管理**：上传、删除文档，关联意图空间
