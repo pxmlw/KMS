@@ -329,7 +329,13 @@ class KnowledgeBase:
         """异步版本的响应生成"""
         from app.config import USE_AI_RESPONSE, FAST_RESPONSE_THRESHOLD
         
+        # 情况1：知识库完全没有命中时，优先尝试用大模型通用知识回答
         if not search_results:
+            if USE_AI_RESPONSE:
+                try:
+                    return await self._generate_ai_response_async(query, [], frontend_type)
+                except Exception:
+                    logger.exception("无命中时调用通用AI响应失败")
             return "抱歉，未找到相关信息。请尝试使用不同的关键词或联系管理员。"
         
         # 检查是否使用AI响应
@@ -362,7 +368,13 @@ class KnowledgeBase:
         """
         from app.config import USE_AI_RESPONSE, FAST_RESPONSE_THRESHOLD
         
+        # 情况1：知识库完全没有命中时，优先尝试用大模型通用知识回答
         if not search_results:
+            if USE_AI_RESPONSE:
+                try:
+                    return self._generate_ai_response(query, [], frontend_type)
+                except Exception:
+                    logger.exception("无命中时调用通用AI响应失败")
             return "抱歉，未找到相关信息。请尝试使用不同的关键词或联系管理员。"
         
         # 检查是否使用AI响应

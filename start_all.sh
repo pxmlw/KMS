@@ -91,14 +91,27 @@ start_streamlit() {
 start_telegram() {
     echo -e "\n${GREEN}启动 Telegram Bot...${NC}"
     $PYTHON_CMD start_telegram_bot.py > logs/telegram_bot.log 2>&1 &
-    sleep 4
+    # 最多等待约 20 秒，期间持续检查是否超时/配置失败
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 2
+        # 进程已经退出，视为启动失败
+        if ! pgrep -f "start_telegram_bot.py" >/dev/null 2>&1; then
+            echo -e "${RED}❌ Telegram Bot 启动失败或已退出，查看 logs/telegram_bot.log${NC}"
+            return 1
+        fi
+        # 日志中出现运行错误 / 超时 / 未配置提示，也视为启动失败
+        if grep -E "Telegram Bot运行错误|Timed out|未配置或初始化失败|连接验证失败" logs/telegram_bot.log >/dev/null 2>&1; then
+            echo -e "${RED}❌ Telegram Bot 启动失败（网络/配置异常），查看 logs/telegram_bot.log${NC}"
+            return 1
+        fi
+    done
+    # 超过等待时间仍在运行且无错误日志，认为启动成功
     if pgrep -f "start_telegram_bot.py" >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Telegram Bot 已启动${NC}"
         return 0
-    else
-        echo -e "${RED}❌ Telegram Bot 启动失败或已退出，查看 logs/telegram_bot.log${NC}"
-        return 1
     fi
+    echo -e "${RED}❌ Telegram Bot 启动状态未知，请查看 logs/telegram_bot.log${NC}"
+    return 1
 }
 start_tunnel() {
     echo -e "\n${GREEN}启动 Cloudflare Tunnel...${NC}"
@@ -237,13 +250,29 @@ fi
 echo -e "\n${GREEN}[3/4] Telegram Bot...${NC}"
 $PYTHON_CMD start_telegram_bot.py > logs/telegram_bot.log 2>&1 &
 TELEGRAM_PID=$!
-sleep 2
-# 再等 2 秒确认进程未立即退出（避免因 get_me 等错误退出仍显示“已启动”）
-sleep 2
-if ps -p $TELEGRAM_PID >/dev/null 2>&1; then
-    echo -e "${GREEN}✅ Telegram Bot 已启动 (PID: $TELEGRAM_PID)${NC}"
-else
-    echo -e "${RED}❌ Telegram Bot 启动失败或已退出，查看 logs/telegram_bot.log${NC}"
+TELEGRAM_OK=1
+# 最多等待约 20 秒监控启动情况
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 2
+    # 进程已经退出，视为启动失败
+    if ! ps -p $TELEGRAM_PID >/dev/null 2>&1; then
+        echo -e "${RED}❌ Telegram Bot 启动失败或已退出，查看 logs/telegram_bot.log${NC}"
+        TELEGRAM_OK=0
+        break
+    fi
+    # 日志中出现运行错误 / 超时 / 未配置提示，也视为启动失败
+    if grep -E "Telegram Bot运行错误|Timed out|未配置或初始化失败|连接验证失败" logs/telegram_bot.log >/dev/null 2>&1; then
+        echo -e "${RED}❌ Telegram Bot 启动失败（网络/配置异常），查看 logs/telegram_bot.log${NC}"
+        TELEGRAM_OK=0
+        break
+    fi
+done
+if [ "$TELEGRAM_OK" -eq 1 ]; then
+    if ps -p $TELEGRAM_PID >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ Telegram Bot 已启动 (PID: $TELEGRAM_PID)${NC}"
+    else
+        echo -e "${RED}❌ Telegram Bot 启动状态未知，请查看 logs/telegram_bot.log${NC}"
+    fi
 fi
 
 # 4. Cloudflare Tunnel（根据开头选择）
