@@ -172,10 +172,11 @@ def frontend_integration_page():
     if 'editing_telegram_id' not in st.session_state:
         st.session_state.editing_telegram_id = None
     
-    # 显示所有Telegram Bot实例
+    # 显示当前 Telegram Bot 配置（系统仅支持一个实例在线）
     if telegram_configs:
-        st.write("**已配置的Telegram Bot实例：**")
-        for config in telegram_configs:
+        st.write("**当前 Telegram Bot 配置（仅支持一个实例，如需更换请编辑或删除后重新添加）：**")
+        # 只显示最新一条配置
+        for config in telegram_configs[:1]:
             status_icon = "🟢" if config['status'] == 'connected' else "🔴"
             bot_config = config.get('config', {})
             
@@ -255,56 +256,57 @@ def frontend_integration_page():
     else:
         st.info("暂无Telegram Bot配置")
     
-    # 添加新Telegram Bot
-    with st.expander("➕ 添加新的Telegram Bot"):
-        telegram_name = st.text_input("Bot名称（可选）", key="telegram_name", value="")
-        telegram_token = st.text_input(
-            "Telegram Bot Token", 
-            type="password",
-            key="telegram_token",
-            help="输入Telegram Bot Token，可在@BotFather获取"
-        )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("保存并连接", key="save_telegram"):
-                if telegram_token:
-                    try:
-                        name = telegram_name.strip() if telegram_name.strip() else None
-                        bot = create_telegram_bot(telegram_token, name)
-                        if bot.test_connection():
-                            bot_info = bot.get_bot_info()
-                            if bot_info:
-                                st.success(f"✅ Telegram Bot连接成功！\nBot: @{bot_info.get('username', 'N/A')}")
+    # 仅在没有配置时允许添加新的 Telegram Bot
+    if not telegram_configs:
+        with st.expander("➕ 添加新的Telegram Bot"):
+            telegram_name = st.text_input("Bot名称（可选）", key="telegram_name", value="")
+            telegram_token = st.text_input(
+                "Telegram Bot Token", 
+                type="password",
+                key="telegram_token",
+                help="输入Telegram Bot Token，可在@BotFather获取"
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("保存并连接", key="save_telegram"):
+                    if telegram_token:
+                        try:
+                            name = telegram_name.strip() if telegram_name.strip() else None
+                            bot = create_telegram_bot(telegram_token, name)
+                            if bot.test_connection():
+                                bot_info = bot.get_bot_info()
+                                if bot_info:
+                                    st.success(f"✅ Telegram Bot连接成功！\nBot: @{bot_info.get('username', 'N/A')}")
+                                else:
+                                    st.success("✅ Telegram Bot连接成功并已保存配置！")
+                                _get_telegram_configs.clear()
+                                st.rerun()
                             else:
-                                st.success("✅ Telegram Bot连接成功并已保存配置！")
-                            _get_telegram_configs.clear()
-                            st.rerun()
-                        else:
-                            st.error("❌ 连接失败，请检查Token")
-                    except Exception as e:
-                        st.error(f"❌ 连接失败: {e}")
-                else:
-                    st.warning("⚠️ 请输入Bot Token")
-        
-        with col2:
-            if st.button("测试连接", key="test_telegram"):
-                if telegram_token:
-                    try:
-                        # 测试连接时不保存配置（save=False）
-                        bot = create_telegram_bot(telegram_token, save=False)
-                        if bot.test_connection():
-                            bot_info = bot.get_bot_info()
-                            if bot_info:
-                                st.success(f"✅ 连接测试成功！\nBot: @{bot_info.get('username', 'N/A')}")
+                                st.error("❌ 连接失败，请检查Token")
+                        except Exception as e:
+                            st.error(f"❌ 连接失败: {e}")
+                    else:
+                        st.warning("⚠️ 请输入Bot Token")
+            
+            with col2:
+                if st.button("测试连接", key="test_telegram"):
+                    if telegram_token:
+                        try:
+                            # 测试连接时不保存配置（save=False）
+                            bot = create_telegram_bot(telegram_token, save=False)
+                            if bot.test_connection():
+                                bot_info = bot.get_bot_info()
+                                if bot_info:
+                                    st.success(f"✅ 连接测试成功！\nBot: @{bot_info.get('username', 'N/A')}")
+                                else:
+                                    st.success("✅ 连接测试成功！")
                             else:
-                                st.success("✅ 连接测试成功！")
-                        else:
-                            st.error("❌ 连接测试失败")
-                    except Exception as e:
-                        st.error(f"❌ 测试失败: {e}")
-                else:
-                    st.warning("⚠️ 请输入Token进行测试")
+                                st.error("❌ 连接测试失败")
+                        except Exception as e:
+                            st.error(f"❌ 测试失败: {e}")
+                    else:
+                        st.warning("⚠️ 请输入Token进行测试")
     
     st.divider()
     
@@ -315,9 +317,9 @@ def frontend_integration_page():
     if 'editing_teams_id' not in st.session_state:
         st.session_state.editing_teams_id = None
     
-    # 显示所有Teams Bot实例
+    # 显示所有Teams Bot实例（系统仅支持一个实例在线）
     if teams_configs:
-        st.write("**已配置的Teams Bot实例：**")
+        st.write("**当前 Teams Bot 配置（仅支持一个实例，如需更换请编辑或删除后重新添加）：**")
         
         # 获取Webhook URL：优先从 API 拉取最新（与 Tunnel 启动后写入的 DB 同步），便于用户复制
         import os
@@ -377,7 +379,7 @@ def frontend_integration_page():
         
         st.divider()
         
-        for config in teams_configs:
+        for config in teams_configs[:1]:
             status_icon = "🟢" if config['status'] == 'connected' else "🔴"
             bot_config = config.get('config', {})
             # 脱敏显示：只展示后4位
@@ -484,60 +486,61 @@ def frontend_integration_page():
     else:
         st.info("暂无Teams Bot配置")
     
-    # 添加新Teams Bot
-    with st.expander("➕ 添加新的Teams Bot"):
-        teams_name = st.text_input("Bot名称（可选）", key="teams_name", value="")
-        teams_app_id = st.text_input(
-            "Teams App ID",
-            key="teams_app_id",
-            help="从Azure Portal获取的App ID"
-        )
-        teams_app_password = st.text_input(
-            "Teams App Password", 
-            type="password",
-            key="teams_app_password",
-            help="从Azure Portal获取的App Password（客户端密码）"
-        )
-        teams_tenant_id = st.text_input(
-            "Tenant ID（单租户Bot必需）",
-            key="teams_tenant_id",
-            help="从Azure Portal → App注册 → 概述 → Directory (tenant) ID获取"
-        )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("保存并连接", key="save_teams"):
-                if teams_app_id and teams_app_password:
-                    try:
-                        name = teams_name.strip() if teams_name.strip() else None
-                        tenant_id = teams_tenant_id if teams_tenant_id.strip() else None
-                        bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id, name)
-                        if bot.test_connection():
-                            st.success("✅ Teams Bot连接成功并已保存配置！")
-                            _get_teams_configs.clear()
-                            st.rerun()
-                        else:
-                            st.error("❌ 连接失败，请检查配置")
-                    except Exception as e:
-                        st.error(f"❌ 连接失败: {e}")
-                else:
-                    st.warning("⚠️ 请输入App ID和Password")
-        
-        with col2:
-            if st.button("测试连接", key="test_teams"):
-                if teams_app_id and teams_app_password:
-                    try:
-                        tenant_id = teams_tenant_id if teams_tenant_id.strip() else None
-                        # 测试连接时不保存配置（save=False）
-                        bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id, save=False)
-                        if bot.test_connection():
-                            st.success("✅ 连接测试成功！")
-                        else:
-                            st.error("❌ 连接测试失败")
-                    except Exception as e:
-                        st.error(f"❌ 测试失败: {e}")
-                else:
-                    st.warning("⚠️ 请输入配置进行测试")
+    # 仅在没有配置时允许添加新的 Teams Bot（每次只维护一个实例）
+    if not teams_configs:
+        with st.expander("➕ 添加新的Teams Bot"):
+            teams_name = st.text_input("Bot名称（可选）", key="teams_name", value="")
+            teams_app_id = st.text_input(
+                "Teams App ID",
+                key="teams_app_id",
+                help="从Azure Portal获取的App ID"
+            )
+            teams_app_password = st.text_input(
+                "Teams App Password", 
+                type="password",
+                key="teams_app_password",
+                help="从Azure Portal获取的App Password（客户端密码）"
+            )
+            teams_tenant_id = st.text_input(
+                "Tenant ID（单租户Bot必需）",
+                key="teams_tenant_id",
+                help="从Azure Portal → App注册 → 概述 → Directory (tenant) ID获取"
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("保存并连接", key="save_teams"):
+                    if teams_app_id and teams_app_password:
+                        try:
+                            name = teams_name.strip() if teams_name.strip() else None
+                            tenant_id = teams_tenant_id if teams_tenant_id.strip() else None
+                            bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id, name)
+                            if bot.test_connection():
+                                st.success("✅ Teams Bot连接成功并已保存配置！")
+                                _get_teams_configs.clear()
+                                st.rerun()
+                            else:
+                                st.error("❌ 连接失败，请检查配置")
+                        except Exception as e:
+                            st.error(f"❌ 连接失败: {e}")
+                    else:
+                        st.warning("⚠️ 请输入App ID和Password")
+            
+            with col2:
+                if st.button("测试连接", key="test_teams"):
+                    if teams_app_id and teams_app_password:
+                        try:
+                            tenant_id = teams_tenant_id if teams_tenant_id.strip() else None
+                            # 测试连接时不保存配置（save=False）
+                            bot = create_teams_bot(teams_app_id, teams_app_password, tenant_id, save=False)
+                            if bot.test_connection():
+                                st.success("✅ 连接测试成功！")
+                            else:
+                                st.error("❌ 连接测试失败")
+                        except Exception as e:
+                            st.error(f"❌ 测试失败: {e}")
+                    else:
+                        st.warning("⚠️ 请输入配置进行测试")
     
     st.divider()
     

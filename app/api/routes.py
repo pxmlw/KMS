@@ -315,24 +315,45 @@ async def update_document(doc_id: int, body: DocumentUpdate):
 @router.get("/documents")
 async def get_documents(
     intent_space_id: Optional[int] = Query(None),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    file_format: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
 ):
-    """获取文档列表"""
+    """获取文档列表（支持按意图、状态、文件名、格式、上传日期筛选），并附带意图空间名称"""
     conn = db.get_connection()
     cursor = conn.cursor()
     
-    query = "SELECT * FROM documents WHERE 1=1"
+    query = """
+        SELECT d.*, i.name AS intent_space_name
+        FROM documents d
+        LEFT JOIN intent_spaces i ON d.intent_space_id = i.id
+        WHERE 1=1
+    """
     params = []
     
     if intent_space_id:
-        query += " AND intent_space_id = ?"
+        query += " AND d.intent_space_id = ?"
         params.append(intent_space_id)
     
     if status:
-        query += " AND status = ?"
+        query += " AND d.status = ?"
         params.append(status)
     
-    query += " ORDER BY upload_date DESC"
+    if keyword:
+        query += " AND d.filename LIKE ?"
+        params.append(f"%{keyword}%")
+    
+    if file_format:
+        query += " AND d.file_format = ?"
+        params.append(file_format)
+    
+    if date_from:
+        # 期望 ISO8601 日期字符串（前端已用 date_input.isoformat() 传入）
+        query += " AND date(d.upload_date) >= date(?)"
+        params.append(date_from)
+    
+    query += " ORDER BY d.upload_date DESC"
     
     cursor.execute(query, params)
     rows = cursor.fetchall()
@@ -342,12 +363,12 @@ async def get_documents(
         {
             "id": row["id"],
             "filename": row["filename"],
-            "file_path": row["file_path"],
             "file_format": row["file_format"],
             "file_size": row["file_size"],
             "upload_date": row["upload_date"],
             "status": row["status"],
-            "intent_space_id": row["intent_space_id"]
+            "intent_space_id": row["intent_space_id"],
+            "intent_space_name": row["intent_space_name"],
         }
         for row in rows
     ]

@@ -20,7 +20,12 @@ class FrontendIntegration:
         self.name = name or "default"  # 默认名称
     
     def save_config(self, config_data: Dict, api_key: Optional[str] = None, bot_id: Optional[int] = None):
-        """保存集成配置（支持更新现有或创建新实例）"""
+        """保存集成配置。
+
+        现在的约束：每种 frontend_type 只保留一个“当前配置”。
+        - 如指定 bot_id，则更新该记录；
+        - 如未指定 bot_id，则优先覆盖该 frontend_type 最新的一条记录，没有则插入新记录。
+        """
         conn = db.get_connection()
         cursor = conn.cursor()
         
@@ -36,24 +41,38 @@ class FrontendIntegration:
         config_json = json.dumps(config_data, ensure_ascii=False)
         
         if bot_id:
-            # 更新现有实例
+            # 更新指定实例
             cursor.execute("""
                 UPDATE frontend_integrations 
-                SET status = 'connected', config_data = ?, api_key_hash = ?, updated_at = CURRENT_TIMESTAMP
+                SET name = ?, status = 'connected', config_data = ?, api_key_hash = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            """, (config_json, api_key_hash, bot_id))
+            """, (self.name, config_json, api_key_hash, bot_id))
         else:
-            # 创建新实例
+            # 未指定 ID：每种 frontend_type 仅保留一个配置，如已存在则覆盖最新一条
             cursor.execute("""
-                INSERT INTO frontend_integrations 
-                (frontend_type, name, status, config_data, api_key_hash, updated_at)
-                VALUES (?, ?, 'connected', ?, ?, CURRENT_TIMESTAMP)
-            """, (
-                self.frontend_type,
-                self.name,
-                config_json,
-                api_key_hash
-            ))
+                SELECT id FROM frontend_integrations
+                WHERE frontend_type = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (self.frontend_type,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute("""
+                    UPDATE frontend_integrations
+                    SET name = ?, status = 'connected', config_data = ?, api_key_hash = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (self.name, config_json, api_key_hash, row["id"]))
+            else:
+                cursor.execute("""
+                    INSERT INTO frontend_integrations 
+                    (frontend_type, name, status, config_data, api_key_hash, updated_at)
+                    VALUES (?, ?, 'connected', ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    self.frontend_type,
+                    self.name,
+                    config_json,
+                    api_key_hash
+                ))
         
         conn.commit()
         conn.close()

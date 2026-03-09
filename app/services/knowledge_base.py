@@ -401,55 +401,72 @@ class KnowledgeBase:
             if not orchestrator.async_ai_client:
                 # 如果没有异步客户端，回退到同步版本
                 return self._generate_ai_response(query, search_results, frontend_type)
-            
-            # 构建上下文（优化：减少文档数量和内容长度）
-            context_parts = []
-            for idx, result in enumerate(search_results[:2], 1):
-                content = result["content"]
-                doc_id = result["metadata"]["doc_id"]
-                filename = result["metadata"].get("filename", f"文档{doc_id}")
-                content_preview = content[:300] if len(content) > 300 else content
-                context_parts.append(f"[{filename}]\n{content_preview}")
-            
-            context = "\n\n".join(context_parts)
-            prompt = f"""根据以下内容回答问题：
 
-问题：{query}
-
-内容：
-{context}
-
-要求：用自然中文直接回答，末尾标注【来源】。简洁准确。"""
-            
             model_name = getattr(orchestrator, 'model', None) or "deepseek/deepseek-chat"
             api_provider = getattr(orchestrator, 'api_provider', 'openai')
-            request_params = {
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": "知识助手，用自然中文直接回答。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.5,
-                "max_tokens": 300
-            }
+            # 如果没有文档结果（通用知识回答），使用简洁通用提示词且不要求【来源】
+            if not search_results:
+                prompt = f"""你是一名中文智能助手。
+
+用户问题：{query}
+
+请基于你自己的通用知识，用自然中文简洁准确地回答，不要编造引用或附加【来源】等标签。"""
+                request_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "中文智能助手，用自然中文直接回答用户问题。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.5,
+                    "max_tokens": 300
+                }
+            else:
+                # 构建基于文档的上下文（优化：减少文档数量和内容长度）
+                context_parts = []
+                for idx, result in enumerate(search_results[:2], 1):
+                    content = result["content"]
+                    doc_id = result["metadata"]["doc_id"]
+                    filename = result["metadata"].get("filename", f"文档{doc_id}")
+                    content_preview = content[:300] if len(content) > 300 else content
+                    context_parts.append(f"[{filename}]\n{content_preview}")
+                
+                context = "\n\n".join(context_parts)
+                prompt = f"""根据以下内容回答问题：
+                
+问题：{query}
+                
+内容：
+{context}
+                
+要求：用自然中文直接回答，末尾标注【来源】。简洁准确。"""
+                request_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "知识助手，用自然中文直接回答。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.5,
+                    "max_tokens": 300
+                }
             
             if api_provider == "openrouter" and hasattr(orchestrator, 'default_headers'):
                 request_params["extra_headers"] = orchestrator.default_headers
             response = await orchestrator.async_ai_client.chat.completions.create(**request_params)
             ai_response = response.choices[0].message.content.strip()
             
-            # 添加来源引用
-            sources = []
-            seen_docs = set()
-            for result in search_results[:2]:
-                doc_id = result["metadata"]["doc_id"]
-                filename = result["metadata"].get("filename", f"文档{doc_id}")
-                if doc_id not in seen_docs:
-                    sources.append(filename)
-                    seen_docs.add(doc_id)
-            
-            if sources:
-                ai_response += f"\n\n📚 来源：{', '.join(sources)}"
+            # 只有在基于文档回答时才附加来源信息
+            if search_results:
+                sources = []
+                seen_docs = set()
+                for result in search_results[:2]:
+                    doc_id = result["metadata"]["doc_id"]
+                    filename = result["metadata"].get("filename", f"文档{doc_id}")
+                    if doc_id not in seen_docs:
+                        sources.append(filename)
+                        seen_docs.add(doc_id)
+                
+                if sources:
+                    ai_response += f"\n\n📚 来源：{', '.join(sources)}"
             
             return self._format_response(ai_response, frontend_type)
         except Exception as e:
@@ -465,41 +482,55 @@ class KnowledgeBase:
             if orchestrator.ai_client:
                 api_provider = getattr(orchestrator, 'api_provider', 'openai')
                 model_name = getattr(orchestrator, 'model', None) or "deepseek/deepseek-chat"
-                # 构建上下文（优化：减少文档数量和内容长度）
-                context_parts = []
-                for idx, result in enumerate(search_results[:2], 1):  # 只取前2个最相关的结果
-                    content = result["content"]
-                    doc_id = result["metadata"]["doc_id"]
-                    filename = result["metadata"].get("filename", f"文档{doc_id}")
-                    # 减少内容长度（从500到300字符）
-                    content_preview = content[:300] if len(content) > 300 else content
-                    context_parts.append(f"[{filename}]\n{content_preview}")
-                
-                context = "\n\n".join(context_parts)
-                
-                # 优化：使用更简洁的prompt，减少token消耗
-                prompt = f"""根据以下内容回答问题：
+                # 如果没有文档结果（通用知识回答），使用简洁通用提示词且不要求【来源】
+                if not search_results:
+                    prompt = f"""你是一名中文智能助手。
 
+用户问题：{query}
+
+请基于你自己的通用知识，用自然中文简洁准确地回答，不要编造引用或附加【来源】等标签。"""
+                    request_params = {
+                        "model": model_name,
+                        "messages": [
+                            {"role": "system", "content": "中文智能助手，用自然中文直接回答用户问题。"},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.5,
+                        "max_tokens": 300
+                    }
+                else:
+                    # 构建基于文档的上下文（优化：减少文档数量和内容长度）
+                    context_parts = []
+                    for idx, result in enumerate(search_results[:2], 1):  # 只取前2个最相关的结果
+                        content = result["content"]
+                        doc_id = result["metadata"]["doc_id"]
+                        filename = result["metadata"].get("filename", f"文档{doc_id}")
+                        # 减少内容长度（从500到300字符）
+                        content_preview = content[:300] if len(content) > 300 else content
+                        context_parts.append(f"[{filename}]\n{content_preview}")
+                    
+                    context = "\n\n".join(context_parts)
+                    
+                    # 使用更简洁的prompt，减少token消耗，并明确要求标注来源
+                    prompt = f"""根据以下内容回答问题：
+                    
 问题：{query}
-
+                    
 内容：
 {context}
-
+                    
 要求：用自然中文直接回答，末尾标注【来源】。简洁准确。"""
 
-                # 获取模型名称和headers
-                model_name = getattr(orchestrator, 'model', None) or "deepseek/deepseek-chat"
-                
-                # 准备请求参数（优化：减少token和temperature以提高速度）
-                request_params = {
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": "知识助手，用自然中文直接回答。"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.5,  # 降低temperature以提高响应速度
-                    "max_tokens": 300  # 减少max_tokens以提高响应速度
-                }
+                    # 准备请求参数（优化：减少token和temperature以提高速度）
+                    request_params = {
+                        "model": model_name,
+                        "messages": [
+                            {"role": "system", "content": "知识助手，用自然中文直接回答。"},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.5,  # 降低temperature以提高响应速度
+                        "max_tokens": 300  # 减少max_tokens以提高响应速度
+                    }
                 
                 # 如果是OpenRouter，添加headers
                 if api_provider == "openrouter" and hasattr(orchestrator, 'default_headers'):
@@ -507,18 +538,19 @@ class KnowledgeBase:
                 response = orchestrator.ai_client.chat.completions.create(**request_params)
                 ai_response = response.choices[0].message.content.strip()
                 
-                # 添加来源引用
-                sources = []
-                seen_docs = set()
-                for result in search_results[:3]:
-                    doc_id = result["metadata"]["doc_id"]
-                    filename = result["metadata"].get("filename", f"文档{doc_id}")
-                    if doc_id not in seen_docs:
-                        sources.append(filename)
-                        seen_docs.add(doc_id)
-                
-                if sources:
-                    ai_response += f"\n\n📚 来源：{', '.join(sources)}"
+                # 只有在基于文档回答时才附加来源信息
+                if search_results:
+                    sources = []
+                    seen_docs = set()
+                    for result in search_results[:3]:
+                        doc_id = result["metadata"]["doc_id"]
+                        filename = result["metadata"].get("filename", f"文档{doc_id}")
+                        if doc_id not in seen_docs:
+                            sources.append(filename)
+                            seen_docs.add(doc_id)
+                    
+                    if sources:
+                        ai_response += f"\n\n📚 来源：{', '.join(sources)}"
                 
                 # 根据前端类型调整格式
                 return self._format_response(ai_response, frontend_type)
