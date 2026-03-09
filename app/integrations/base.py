@@ -3,8 +3,11 @@
 """
 import json
 import hashlib
+import logging
 from typing import Dict, Optional, List
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from app.models.database import db
 
@@ -77,8 +80,7 @@ class FrontendIntegration:
                 try:
                     is_connected = self._verify_bot_connection(config)
                 except Exception:
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception("验证Bot连接失败")
                 actual_status = "connected" if is_connected else "disconnected"
                 conn = db.get_connection()
                 cursor = conn.cursor()

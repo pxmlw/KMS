@@ -2,7 +2,10 @@
 Microsoft Teams Bot集成
 """
 import os
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings
@@ -152,8 +155,7 @@ class TeamsBotIntegration(FrontendIntegration):
             return response_activity
             
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            logger.exception("处理Teams消息失败")
             # 返回错误响应
             if ActivityTypes:
                 error_activity = Activity(
@@ -198,9 +200,7 @@ class TeamsBotIntegration(FrontendIntegration):
                 # 如果都没有，至少检查配置是否存在
                 return self.adapter is not None
         except Exception as e:
-            # 连接失败
-            import traceback
-            traceback.print_exc()
+            logger.exception("Teams Bot连接验证失败")
             return False
     
     def _verify_bot_connection(self, config: Dict) -> bool:

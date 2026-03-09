@@ -319,29 +319,39 @@ def frontend_integration_page():
     if teams_configs:
         st.write("**已配置的Teams Bot实例：**")
         
-        # 获取Webhook URL（优先从数据库读取）
+        # 获取Webhook URL：优先从 API 拉取最新（与 Tunnel 启动后写入的 DB 同步），便于用户复制
         import os
-        from app.utils.tunnel_url_saver import get_webhook_url
-        
-        # 优先从数据库读取（Cloudflare Tunnel自动保存的完整webhook URL）
-        saved_webhook_url = get_webhook_url()
-        
-        # 如果没有，从环境变量读取并生成完整URL
+        saved_webhook_url = None
+        if requests:
+            try:
+                base_url = os.environ.get("FASTAPI_URL", "http://127.0.0.1:8000")
+                r = requests.get(f"{base_url.rstrip('/')}/api/webhook-url", timeout=3)
+                if r.ok:
+                    data = r.json()
+                    saved_webhook_url = (data.get("webhook_url") or "").strip() or None
+            except Exception:
+                pass
+        if not saved_webhook_url:
+            from app.utils.tunnel_url_saver import get_webhook_url
+            saved_webhook_url = get_webhook_url() or None
         if not saved_webhook_url:
             tunnel_url = os.environ.get("TUNNEL_URL", "") or os.environ.get("CLOUDFLARE_TUNNEL_URL", "") or os.environ.get("WEBHOOK_URL", "")
             if tunnel_url:
                 saved_webhook_url = f"{tunnel_url.rstrip('/')}/api/teams/messages"
-        
-        # 如果还没有，从Teams Bot配置中读取（兼容旧数据）
         if not saved_webhook_url and teams_configs:
             first_config = teams_configs[0].get('config', {})
             base_url = first_config.get('webhook_base_url', '')
             if base_url:
                 saved_webhook_url = f"{base_url.rstrip('/')}/api/teams/messages"
         
-        # 显示Webhook URL（简洁版）
+        # 显示Webhook URL（简洁版）+ 刷新按钮，便于 Tunnel 启动后同步最新地址
         if saved_webhook_url:
-            st.write("**Webhook URL：**")
+            col_title, col_btn = st.columns([3, 1])
+            with col_title:
+                st.write("**Webhook URL：**（复制到 Teams 开发者门户配置）")
+            with col_btn:
+                if st.button("🔄 刷新", key="refresh_webhook_url", help="启动 Tunnel 后点击可获取最新地址"):
+                    st.rerun()
             st.code(saved_webhook_url, language=None)
             
             # 测试按钮
@@ -361,20 +371,30 @@ def frontend_integration_page():
                 else:
                     st.warning("⚠️ requests库未安装，无法测试连接")
         else:
-            st.info("⚠️ 未检测到Webhook URL，请启动Cloudflare Tunnel")
+            st.info("⚠️ 未检测到Webhook URL，请启动Cloudflare Tunnel 后点击下方刷新")
+            if st.button("🔄 刷新 Webhook URL", key="refresh_webhook_empty", help="启动 Tunnel 后点击获取最新地址"):
+                st.rerun()
         
         st.divider()
         
         for config in teams_configs:
             status_icon = "🟢" if config['status'] == 'connected' else "🔴"
             bot_config = config.get('config', {})
+            # 脱敏显示：只展示后4位
+            def _mask_value(v: str) -> str:
+                if not v:
+                    return ""
+                v = str(v)
+                return ("*" * max(len(v) - 4, 0)) + v[-4:]
             
             with st.expander(f"{status_icon} {config['name']} - {config['status']}"):
-                # 显示配置信息
+                # 显示配置信息（仅展示后4位）
                 if bot_config.get('app_id'):
-                    st.write(f"**App ID**: {bot_config['app_id']}")
+                    masked_app_id = _mask_value(bot_config.get('app_id', ''))
+                    st.write(f"**App ID**: {masked_app_id}")
                 if bot_config.get('tenant_id'):
-                    st.write(f"**Tenant ID**: {bot_config['tenant_id']}")
+                    masked_tenant_id = _mask_value(bot_config.get('tenant_id', ''))
+                    st.write(f"**Tenant ID**: {masked_tenant_id}")
                 if config.get('api_key_hash'):
                     st.write(f"**Password哈希**: ...{config['api_key_hash']}")
                 if config.get('updated_at'):
@@ -812,6 +832,7 @@ def intent_configuration_page():
     
     # 意图空间列表
     st.subheader("意图空间列表")
+    editing_intent_id = st.session_state.get("editing_intent_id")
     try:
         conn = db.get_connection()
         cursor = conn.cursor()
@@ -825,33 +846,81 @@ def intent_configuration_page():
                     col1, col2 = st.columns([3, 1])
                     
                     with col1:
-                        st.write(f"**描述**: {row['description'] or '无描述'}")
-                        st.write(f"**关键词**: {row['keywords'] or '无关键词'}")
-                        
-                        # 查询分类日志
-                        try:
-                            conn_logs = db.get_connection()
-                            cursor_logs = conn_logs.cursor()
-                            cursor_logs.execute("""
-                                SELECT detected_intent, confidence, COUNT(*) as count
-                                FROM query_history
-                                WHERE detected_intent = ?
-                                GROUP BY detected_intent, confidence
-                            """, (row['name'],))
-                            logs = cursor_logs.fetchall()
-                            conn_logs.close()
+                        if editing_intent_id == row["id"]:
+                            # 编辑模式
+                            st.markdown("**编辑意图空间**")
+                            edit_name = st.text_input("名称", value=row["name"] or "", key=f"intent_name_{row['id']}")
+                            edit_desc = st.text_area("描述", value=row["description"] or "", key=f"intent_desc_{row['id']}")
+                            edit_kw = st.text_input("关键词（逗号分隔）", value=row["keywords"] or "", key=f"intent_kw_{row['id']}")
+                            c1, c2, _ = st.columns([1, 1, 4])
+                            with c1:
+                                if st.button("保存", key=f"save_intent_{row['id']}"):
+                                    if edit_name.strip():
+                                        try:
+                                            if requests:
+                                                r = requests.patch(
+                                                    f"http://localhost:8000/api/intent-spaces/{row['id']}",
+                                                    json={"name": edit_name.strip(), "description": edit_desc.strip(), "keywords": edit_kw.strip()},
+                                                    timeout=10
+                                                )
+                                                if r.status_code == 200:
+                                                    st.success("✅ 已更新")
+                                                    st.session_state.pop("editing_intent_id", None)
+                                                    st.rerun()
+                                                else:
+                                                    st.error(r.json().get("detail", "更新失败"))
+                                            else:
+                                                conn_u = db.get_connection()
+                                                cur = conn_u.cursor()
+                                                cur.execute(
+                                                    "UPDATE intent_spaces SET name=?, description=?, keywords=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                                                    (edit_name.strip(), edit_desc.strip(), edit_kw.strip(), row["id"])
+                                                )
+                                                conn_u.commit()
+                                                conn_u.close()
+                                                st.success("✅ 已更新")
+                                                st.session_state.pop("editing_intent_id", None)
+                                                st.rerun()
+                                        except Exception as e:
+                                            st.error(str(e))
+                                    else:
+                                        st.warning("名称为必填")
+                            with c2:
+                                if st.button("取消", key=f"cancel_intent_{row['id']}"):
+                                    st.session_state.pop("editing_intent_id", None)
+                                    st.rerun()
+                        else:
+                            st.write(f"**描述**: {row['description'] or '无描述'}")
+                            st.write(f"**关键词**: {row['keywords'] or '无关键词'}")
                             
-                            if logs:
-                                st.write("**分类统计**:")
-                                for log in logs:
-                                    st.write(f"- 置信度 {log['confidence']:.2f}: {log['count']} 次查询")
-                            else:
-                                st.write("*暂无查询统计*")
-                        except Exception as e:
-                            st.write(f"*无法加载统计信息: {e}*")
+                            # 查询分类日志
+                            try:
+                                conn_logs = db.get_connection()
+                                cursor_logs = conn_logs.cursor()
+                                cursor_logs.execute("""
+                                    SELECT detected_intent, confidence, COUNT(*) as count
+                                    FROM query_history
+                                    WHERE detected_intent = ?
+                                    GROUP BY detected_intent, confidence
+                                """, (row['name'],))
+                                logs = cursor_logs.fetchall()
+                                conn_logs.close()
+                                
+                                if logs:
+                                    st.write("**分类统计**:")
+                                    for log in logs:
+                                        st.write(f"- 置信度 {log['confidence']:.2f}: {log['count']} 次查询")
+                                else:
+                                    st.write("*暂无查询统计*")
+                            except Exception as e:
+                                st.write(f"*无法加载统计信息: {e}*")
                     
                     with col2:
                         st.markdown("<br>", unsafe_allow_html=True)
+                        if editing_intent_id != row["id"]:
+                            if st.button("✏️ 编辑", key=f"edit_intent_{row['id']}", use_container_width=True):
+                                st.session_state["editing_intent_id"] = row["id"]
+                                st.rerun()
                         if st.button("🗑️ 删除", key=f"delete_intent_{row['id']}", type="primary", use_container_width=True):
                             try:
                                 conn = db.get_connection()
@@ -864,12 +933,11 @@ def intent_configuration_page():
                                 if doc_count > 0:
                                     st.warning(f"⚠️ 该意图空间关联了 {doc_count} 个文档，删除前请先处理这些文档。")
                                 else:
-                                    # 删除意图空间
                                     cursor.execute("DELETE FROM intent_spaces WHERE id = ?", (row['id'],))
                                     conn.commit()
-                                    conn.close()
                                     st.success(f"✅ 意图空间 '{row['name']}' 已删除")
                                     st.rerun()
+                                conn.close()
                             except Exception as e:
                                 st.error(f"❌ 删除失败: {e}")
                                 if conn:

@@ -5,7 +5,10 @@ Cloudflare Tunnel URL捕获和保存工具
 import re
 import sys
 import json
+import logging
 from app.models.database import db
+
+logger = logging.getLogger(__name__)
 
 
 def extract_tunnel_url(text: str) -> str:
@@ -107,9 +110,8 @@ def save_webhook_url(url: str):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
-        import traceback
-        traceback.print_exc(file=sys.stderr)
+    except Exception:
+        logger.exception("保存 Webhook URL 失败")
         return False
 
 

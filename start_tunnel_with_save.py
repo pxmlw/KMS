@@ -8,6 +8,9 @@ import os
 import re
 import time
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 确保从项目根目录运行
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -47,8 +50,6 @@ def monitor_tunnel_output(proc):
                         continue
                     
                     print(f"\n🔗 检测到Tunnel URL: {url}")
-                    print(f"   原始输出片段: {repr(line[:200])}")
-                    
                     # 保存完整的webhook URL（save_webhook_url会自动处理，如果输入基础URL会自动加上/api/teams/messages）
                     if save_webhook_url(url):
                         # 获取保存后的完整URL（save_webhook_url内部会处理）
@@ -66,8 +67,7 @@ def monitor_tunnel_output(proc):
                         buffer = buffer[-5000:]
     except Exception as e:
         print(f"\n⚠️  监控Tunnel输出时出错: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        logger.exception("监控Tunnel输出失败")
 
 
 def main():

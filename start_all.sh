@@ -48,6 +48,21 @@ stop_tunnel() {
     pkill -f "cloudflared tunnel" 2>/dev/null && echo -e "${YELLOW}已停止 Cloudflare Tunnel${NC}" || true
 }
 
+# 将 Tunnel 的 webhook URL 写入数据库，供 Teams 等使用
+save_tunnel_url_to_db() {
+    local url="$1"
+    [ -z "$url" ] && return 1
+    export TUNNEL_URL_TO_SAVE="$url"
+    $PYTHON_CMD -c "
+import os, sys
+sys.path.insert(0, '.')
+from app.utils.tunnel_url_saver import save_webhook_url
+url = os.environ.get('TUNNEL_URL_TO_SAVE', '')
+ok = bool(url and save_webhook_url(url))
+sys.exit(0 if ok else 1)
+" 2>/dev/null && return 0 || return 1
+}
+
 # ---------- 启动单个服务 ----------
 start_fastapi() {
     echo -e "\n${GREEN}启动 FastAPI (端口8000)...${NC}"
@@ -76,12 +91,12 @@ start_streamlit() {
 start_telegram() {
     echo -e "\n${GREEN}启动 Telegram Bot...${NC}"
     $PYTHON_CMD start_telegram_bot.py > logs/telegram_bot.log 2>&1 &
-    sleep 2
+    sleep 4
     if pgrep -f "start_telegram_bot.py" >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Telegram Bot 已启动${NC}"
         return 0
     else
-        echo -e "${RED}❌ Telegram Bot 启动失败，查看 logs/telegram_bot.log${NC}"
+        echo -e "${RED}❌ Telegram Bot 启动失败或已退出，查看 logs/telegram_bot.log${NC}"
         return 1
     fi
 }
@@ -93,11 +108,18 @@ start_tunnel() {
     fi
     cloudflared tunnel --url http://localhost:8000 > logs/tunnel.log 2>&1 &
     local pid=$!
-    sleep 4
+    TUNNEL_URL=""
+    for _ in 1 2 3 4 5 6 7 8; do
+        sleep 2
+        TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' logs/tunnel.log 2>/dev/null | tail -1)
+        [ -n "$TUNNEL_URL" ] && break
+    done
     if ps -p $pid >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Cloudflare Tunnel 已启动 (PID: $pid)${NC}"
-        TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' logs/tunnel.log 2>/dev/null | tail -1)
-        [ -n "$TUNNEL_URL" ] && echo -e "   公网地址: ${TUNNEL_URL}   Webhook: ${TUNNEL_URL}/api/teams/messages"
+        if [ -n "$TUNNEL_URL" ]; then
+            echo -e "   公网地址: ${TUNNEL_URL}   Webhook: ${TUNNEL_URL}/api/teams/messages"
+            save_tunnel_url_to_db "$TUNNEL_URL" && echo -e "   ${GREEN}✓ 新 Webhook 已写入数据库${NC}"
+        fi
         return 0
     else
         echo -e "${YELLOW}⚠️  Tunnel 启动失败，查看 logs/tunnel.log${NC}"
@@ -169,12 +191,20 @@ echo
 START_TUNNEL=0
 [[ $REPLY =~ ^[Yy]$ ]] && START_TUNNEL=1
 
-# 清理函数（仅“启动全部”时生效）
+# 清理函数（仅“启动全部”时生效）：先 SIGTERM，短等后强制 kill -9，避免卡住
 FASTAPI_PID= STREAMLIT_PID= TELEGRAM_PID= TUNNEL_PID=
 cleanup() {
     echo -e "\n${YELLOW}正在停止所有服务...${NC}"
     kill $FASTAPI_PID $STREAMLIT_PID $TELEGRAM_PID $TUNNEL_PID 2>/dev/null
-    wait $FASTAPI_PID $STREAMLIT_PID $TELEGRAM_PID $TUNNEL_PID 2>/dev/null
+    sleep 1
+    for p in $FASTAPI_PID $STREAMLIT_PID $TELEGRAM_PID $TUNNEL_PID; do
+        [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
+    done
+    # 按端口再杀一次，防止子进程未退出（兼容 macOS，无 xargs -r）
+    pid=$(lsof -ti :8000 2>/dev/null); [ -n "$pid" ] && kill -9 $pid 2>/dev/null || true
+    pid=$(lsof -ti :8501 2>/dev/null); [ -n "$pid" ] && kill -9 $pid 2>/dev/null || true
+    pkill -9 -f "start_telegram_bot.py" 2>/dev/null || true
+    pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
     echo -e "${GREEN}所有服务已停止${NC}"
     exit 0
 }
@@ -208,10 +238,12 @@ echo -e "\n${GREEN}[3/4] Telegram Bot...${NC}"
 $PYTHON_CMD start_telegram_bot.py > logs/telegram_bot.log 2>&1 &
 TELEGRAM_PID=$!
 sleep 2
+# 再等 2 秒确认进程未立即退出（避免因 get_me 等错误退出仍显示“已启动”）
+sleep 2
 if ps -p $TELEGRAM_PID >/dev/null 2>&1; then
     echo -e "${GREEN}✅ Telegram Bot 已启动 (PID: $TELEGRAM_PID)${NC}"
 else
-    echo -e "${YELLOW}⚠️  Telegram Bot 启动失败，继续${NC}"
+    echo -e "${RED}❌ Telegram Bot 启动失败或已退出，查看 logs/telegram_bot.log${NC}"
 fi
 
 # 4. Cloudflare Tunnel（根据开头选择）
@@ -220,11 +252,24 @@ if [ "$START_TUNNEL" = "1" ]; then
     if command -v cloudflared &>/dev/null; then
         cloudflared tunnel --url http://localhost:8000 > logs/tunnel.log 2>&1 &
         TUNNEL_PID=$!
-        sleep 4
+        TUNNEL_URL=""
+        for _ in 1 2 3 4 5 6 7 8; do
+            sleep 2
+            TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' logs/tunnel.log 2>/dev/null | tail -1)
+            [ -n "$TUNNEL_URL" ] && break
+        done
         if ps -p $TUNNEL_PID >/dev/null 2>&1; then
             echo -e "${GREEN}✅ Cloudflare Tunnel 已启动 (PID: $TUNNEL_PID)${NC}"
-            TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' logs/tunnel.log 2>/dev/null | tail -1)
-            [ -n "$TUNNEL_URL" ] && echo -e "   公网: ${TUNNEL_URL}   Webhook: ${TUNNEL_URL}/api/teams/messages"
+            if [ -n "$TUNNEL_URL" ]; then
+                echo -e "   公网: ${TUNNEL_URL}   Webhook: ${TUNNEL_URL}/api/teams/messages"
+                if save_tunnel_url_to_db "$TUNNEL_URL"; then
+                    echo -e "   ${GREEN}✓ 新 Webhook 已写入数据库，Teams 将使用此地址${NC}"
+                else
+                    echo -e "   ${YELLOW}⚠ 写入数据库失败，管理界面可能仍显示旧地址${NC}"
+                fi
+            else
+                echo -e "   ${YELLOW}⚠ 未从日志解析到 URL，请稍后查看 logs/tunnel.log 或管理界面手动更新${NC}"
+            fi
         else
             echo -e "${YELLOW}⚠️  Tunnel 启动失败，查看 logs/tunnel.log${NC}"
         fi

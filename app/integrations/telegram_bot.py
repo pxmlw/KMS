@@ -2,8 +2,11 @@
 Telegram Bot集成
 """
 import os
+import logging
 from typing import Optional, Dict
 import asyncio
+
+logger = logging.getLogger(__name__)
 
 try:
     from telegram import Bot, Update
@@ -30,7 +33,7 @@ class TelegramBotIntegration(FrontendIntegration):
             try:
                 self.application = Application.builder().token(bot_token).build()
             except Exception as e:
-                print(f"Telegram Bot初始化失败: {e}")
+                logger.warning("Telegram Bot初始化失败: %s", e)
     
     def setup_handlers(self):
         """设置Bot处理器"""
@@ -45,7 +48,11 @@ class TelegramBotIntegration(FrontendIntegration):
             """处理查询消息"""
             query = update.message.text.strip()
             user_id = str(update.effective_user.id)
-            
+            # 先发送“正在输入”状态，让用户看到正在思考
+            try:
+                await update.effective_chat.send_chat_action(action="typing")
+            except Exception:
+                pass
             # 意图分类
             detected_intent, confidence = orchestrator.classify_intent(query)
             
@@ -96,13 +103,13 @@ class TelegramBotIntegration(FrontendIntegration):
                 print(f"停止Bot时出错: {e}")
     
     def test_connection(self) -> bool:
-        """测试连接"""
+        """测试连接（python-telegram-bot v20+ 中 get_me 为异步）"""
         if not self.bot_token:
             return False
         try:
             bot = Bot(self.bot_token)
-            bot_info = bot.get_me()
-            return True
+            bot_info = asyncio.run(bot.get_me())
+            return bot_info is not None
         except Exception:
             return False
     
@@ -113,7 +120,7 @@ class TelegramBotIntegration(FrontendIntegration):
         if not bot_token:
             return False
         
-        # 真正测试连接：调用Telegram API验证token是否有效
+        # 真正测试连接：调用Telegram API验证token是否有效（python-telegram-bot v20+ 中 get_me 为异步）
         try:
             from telegram import Bot
             from telegram.request import HTTPXRequest
@@ -122,9 +129,7 @@ class TelegramBotIntegration(FrontendIntegration):
             # 创建带超时的request对象（5秒超时）
             request = HTTPXRequest(connection_pool_size=1, read_timeout=5.0, write_timeout=5.0, connect_timeout=5.0)
             bot = Bot(bot_token, request=request)
-            # 调用get_me()真正测试连接
-            bot_info = bot.get_me()
-            # 如果成功获取Bot信息，说明连接有效
+            bot_info = asyncio.run(bot.get_me())
             return bot_info is not None
         except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
             # 超时或网络错误，说明无法连接
@@ -136,12 +141,12 @@ class TelegramBotIntegration(FrontendIntegration):
             return False
     
     def get_bot_info(self) -> Optional[Dict]:
-        """获取Bot详细信息"""
+        """获取Bot详细信息（python-telegram-bot v20+ 中 get_me 为异步，需 asyncio.run）"""
         if not self.bot_token:
             return None
         try:
             bot = Bot(self.bot_token)
-            bot_info = bot.get_me()
+            bot_info = asyncio.run(bot.get_me())
             return {
                 "id": bot_info.id,
                 "username": bot_info.username,
@@ -234,8 +239,7 @@ def start_telegram_bot_polling():
         print("Telegram Bot已停止")
     except Exception as e:
         print(f"❌ Telegram Bot运行错误: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Telegram Bot运行错误")
 
 
 def _update_env_file(key: str, value: str):

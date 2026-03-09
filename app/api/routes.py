@@ -1,10 +1,13 @@
 """
 API路由
 """
+import logging
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from typing import Optional, List
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from app.services.document_parser import document_parser
 from app.services.knowledge_base import kb
@@ -38,6 +41,11 @@ class FrontendConfig(BaseModel):
     frontend_type: str
     config: dict
     api_key: Optional[str] = None
+
+
+class DocumentUpdate(BaseModel):
+    intent_space_id: Optional[int] = 0
+    reparse: Optional[bool] = False
 
 
 # 文档上传
@@ -211,7 +219,99 @@ async def create_intent_space(intent_space: IntentSpaceCreate):
         raise HTTPException(status_code=500, detail=f"创建失败: {str(e)}")
 
 
+@router.patch("/intent-spaces/{intent_id}")
+async def update_intent_space(intent_id: int, intent_space: IntentSpaceCreate):
+    """更新意图空间（名称、描述、关键词）"""
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM intent_spaces WHERE id = ?", (intent_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="意图空间不存在")
+        cursor.execute("""
+            UPDATE intent_spaces
+            SET name = ?, description = ?, keywords = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (intent_space.name, intent_space.description, intent_space.keywords, intent_id))
+        conn.commit()
+        conn.close()
+        return {"message": "意图空间已更新", "id": intent_id}
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=400, detail="意图空间名称已存在")
+    except Exception as e:
+        if conn:
+            conn.close()
+        raise HTTPException(status_code=500, detail=f"更新失败: {str(e)}")
+
+
 # 文档管理
+@router.get("/documents/{doc_id}")
+async def get_document(doc_id: int):
+    """获取单个文档信息及内容预览"""
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, filename, file_path, file_format, file_size, upload_date, status, intent_space_id FROM documents WHERE id = ?",
+        (doc_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    try:
+        parse_result = document_parser.parse_document(row["file_path"], row["filename"])
+        raw = parse_result.get("raw_content", "") or ""
+        content_preview = raw[:5000] if len(raw) > 5000 else raw
+    except Exception:
+        content_preview = ""
+    return {
+        "id": row["id"],
+        "filename": row["filename"],
+        "file_format": row["file_format"],
+        "file_size": row["file_size"],
+        "upload_date": row["upload_date"],
+        "status": row["status"],
+        "intent_space_id": row["intent_space_id"],
+        "content_preview": content_preview,
+    }
+
+
+@router.patch("/documents/{doc_id}")
+async def update_document(doc_id: int, body: DocumentUpdate):
+    """更新文档（意图空间、可选重新解析）"""
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, filename, file_path, intent_space_id FROM documents WHERE id = ?", (doc_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="文档不存在")
+    intent_space_id = body.intent_space_id if body.intent_space_id else None
+    if body.reparse:
+        try:
+            parse_result = document_parser.parse_document(row["file_path"], row["filename"])
+            import json
+            cursor.execute(
+                """UPDATE documents SET intent_space_id = ?, processed_content = ?, metadata = ?, status = 'processed' WHERE id = ?""",
+                (intent_space_id, json.dumps(parse_result["structured_content"], ensure_ascii=False), json.dumps(parse_result["metadata"], ensure_ascii=False), doc_id)
+            )
+            conn.commit()
+            kb.delete_document(doc_id)
+            raw_content = parse_result["raw_content"]
+            metadata = parse_result["metadata"]
+            kb.add_document(doc_id, raw_content, metadata, intent_space_id)
+        except Exception as e:
+            conn.close()
+            raise HTTPException(status_code=500, detail=f"重新解析失败: {str(e)}")
+    else:
+        cursor.execute("UPDATE documents SET intent_space_id = ? WHERE id = ?", (intent_space_id, doc_id))
+        conn.commit()
+    conn.close()
+    return {"message": "文档已更新", "doc_id": doc_id}
+
+
 @router.get("/documents")
 async def get_documents(
     intent_space_id: Optional[int] = Query(None),
@@ -338,6 +438,15 @@ async def get_kb_usage():
     return analytics.get_kb_usage()
 
 
+# Webhook URL（供前端同步显示 Tunnel 启动后写入的最新地址）
+@router.get("/webhook-url")
+async def get_webhook_url():
+    """返回当前数据库中保存的 Teams Webhook URL，供管理界面复制与刷新"""
+    from app.utils.tunnel_url_saver import get_webhook_url as _get_webhook_url
+    url = _get_webhook_url()
+    return {"webhook_url": url or ""}
+
+
 # Teams Bot消息端点
 @router.post("/teams/messages")
 async def teams_messages(request: Request):
@@ -380,13 +489,16 @@ async def teams_messages(request: Request):
         # 处理消息并生成响应
         async def process_turn(turn_context):
             try:
+                # 先发送“正在思考”状态
+                try:
+                    await turn_context.send_activity(Activity(type="typing"))
+                except Exception:
+                    pass
                 response_activity = await teams_bot.handle_message(activity)
                 if response_activity:
                     await turn_context.send_activity(response_activity)
             except Exception as e:
-                import traceback
-                traceback.print_exc()
-                
+                logger.exception("处理Teams消息失败")
                 # 发送错误消息给用户
                 try:
                     await turn_context.send_activity(
@@ -420,12 +532,10 @@ async def teams_messages(request: Request):
                     process_turn   # 处理函数
                 )
             except Exception as e2:
-                import traceback
-                traceback.print_exc()
+                logger.exception("process_activity 方式2 失败")
                 raise e2
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            logger.exception("process_activity 失败")
             # 如果process_activity失败，返回错误响应
             return JSONResponse(
                 content={
@@ -449,8 +559,7 @@ async def teams_messages(request: Request):
             status_code=500
         )
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception("处理Teams消息失败")
         return JSONResponse(
             content={"error": "处理Teams消息失败", "message": str(e)},
             status_code=500

@@ -4,8 +4,11 @@ Bot连接状态监控服务
 """
 import asyncio
 import json
+import logging
 from typing import Dict, List
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from app.models.database import db
 from app.integrations.telegram_bot import TelegramBotIntegration
@@ -81,10 +84,9 @@ class BotMonitor:
                 if old_status != actual_status:
                     updated_count += 1
             
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-    
+        except Exception:
+            logger.exception("检测Bot连接状态失败")
+
     async def run_periodic_check(self):
         """定期执行检测任务"""
         self.is_running = True
@@ -92,10 +94,8 @@ class BotMonitor:
         # 启动时立即执行一次检测
         try:
             await self.check_all_bots()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-        
+        except Exception:
+            logger.exception("启动时检测Bot失败")
         # 然后定期执行检测
         while self.is_running:
             try:
@@ -103,10 +103,9 @@ class BotMonitor:
                 await self.check_all_bots()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-    
+            except Exception:
+                logger.exception("定期检测Bot失败")
+
     def start(self):
         """启动监控服务"""
         if self._task is None or self._task.done():

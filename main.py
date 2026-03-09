@@ -3,11 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # 加载环境变量
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s: %(message)s")
 
 # 配置代理绕过：Microsoft Online域名不应使用代理
 # 这需要在导入botframework之前设置，因为MSAL会在导入时读取环境变量

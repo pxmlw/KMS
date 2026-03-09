@@ -4,9 +4,12 @@
 """
 import os
 import json
+import logging
 from typing import List, Dict, Optional
 from pathlib import Path
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     import faiss
@@ -37,8 +40,7 @@ class KnowledgeBase:
                 # 使用轻量级中文嵌入模型
                 self.embedding_model = SentenceTransformer('paraphrase-multilang-MiniLM-L12-v2')
             except Exception as e:
-                print(f"警告：无法加载嵌入模型: {e}")
-                print("将使用简化版文本匹配")
+                logger.warning("无法加载嵌入模型 %s，将使用简化版文本匹配", e)
     
     def add_document(self, doc_id: int, content: str, 
                       metadata: Dict, intent_space_id: Optional[int] = None):
@@ -134,7 +136,32 @@ class KnowledgeBase:
                     "metadata": metadata
                 }, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"FAISS索引更新失败: {e}")
+            logger.warning("FAISS索引更新失败: %s", e)
+    
+    def delete_document(self, doc_id: int):
+        """从知识库中删除指定文档的所有块及 FAISS 索引。"""
+        # 删除 kb_dir 下该文档的 chunk 元数据文件
+        for f in self.kb_dir.glob(f"{doc_id}_*.json"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        # 从内存中移除该文档的块
+        self.document_chunks = [c for c in self.document_chunks if c["metadata"].get("doc_id") != doc_id]
+        # 重建 FAISS 索引（IndexFlatL2 无法单条删除，只能整体重建）
+        if not self.embedding_model or not self.document_chunks:
+            self.index = None
+            return
+        try:
+            self.index = faiss.IndexFlatL2(
+                len(self.embedding_model.encode([self.document_chunks[0]["content"]])[0])
+            )
+            for chunk_data in self.document_chunks:
+                text = chunk_data["content"]
+                emb = self.embedding_model.encode([text])[0]
+                self.index.add(np.array([emb], dtype=np.float32))
+        except Exception:
+            self.index = None
     
     def _load_documents_from_db(self):
         """从数据库加载文档到知识库"""
@@ -159,87 +186,73 @@ class KnowledgeBase:
                 
                 self.add_document(doc["id"], raw_content, metadata, doc["intent_space_id"])
             except Exception as e:
-                print(f"加载文档 {doc['id']} 失败: {e}")
+                logger.warning("加载文档 %s 失败: %s", doc["id"], e)
     
+    # 跨意图回退阈值：主意图结果最高分低于此值时，会再搜全库（解决“问HR问题但答案在财务文档”）
+    FALLBACK_SCORE_THRESHOLD = 0.5
+
     def search(self, query: str, intent_space_id: Optional[int] = None, 
                 top_k: int = 5) -> List[Dict]:
         """
-        语义搜索知识库
-        
-        Args:
-            query: 查询文本
-            intent_space_id: 可选的意图空间ID（过滤）
-            top_k: 返回前K个结果
-            
-        Returns:
-            搜索结果列表
+        语义搜索知识库。
+        若指定了 intent_space_id 且该意图下无结果或最高分较低，会自动用全库再搜一次并取更好结果。
         """
         # 如果知识库为空，尝试从数据库加载
         if len(self.document_chunks) == 0:
             self._load_documents_from_db()
         
         if not self.embedding_model or self.index is None:
-            # 回退到简单文本匹配
-            return self._simple_search(query, intent_space_id, top_k)
+            results = self._simple_search(query, intent_space_id, top_k)
+            if intent_space_id is not None and (not results or results[0]["score"] < self.FALLBACK_SCORE_THRESHOLD):
+                fallback = self._simple_search(query, None, top_k)
+                if fallback and (not results or fallback[0]["score"] > results[0]["score"]):
+                    return fallback
+            return results
         
         try:
-            # 生成查询向量
             query_embedding = self.embedding_model.encode([query])[0]
             query_embedding = np.array(query_embedding, dtype=np.float32)
-            
-            # FAISS搜索
             distances, indices = self.index.search(
                 np.array([query_embedding], dtype=np.float32),
-                top_k * 2  # 多取一些以便过滤
+                top_k * 2
             )
-            
-            # 加载结果
             results = []
             seen_doc_ids = set()
-            
             for dist, idx in zip(distances[0], indices[0]):
                 if idx >= len(self.document_chunks):
                     continue
-                
                 chunk_data = self.document_chunks[idx]
                 chunk_metadata = chunk_data["metadata"]
-                
-                # 意图空间过滤
-                # 如果指定了意图空间，只搜索匹配的文档 + 没有指定意图空间的通用文档
-                # 如果没有指定意图空间，搜索所有文档
                 chunk_intent_space_id = chunk_metadata.get("intent_space_id")
                 if intent_space_id is not None:
-                    # 指定了意图空间：只搜索匹配的文档或通用文档（None）
                     if chunk_intent_space_id is not None and chunk_intent_space_id != intent_space_id:
                         continue
-                # 如果 intent_space_id 是 None，不过滤，搜索所有文档
-                
                 doc_id = chunk_metadata["doc_id"]
                 if doc_id in seen_doc_ids:
-                    continue  # 每个文档只返回一个结果
+                    continue
                 seen_doc_ids.add(doc_id)
-                
-                # 加载完整元数据
                 metadata_path = self.kb_dir / f"{chunk_data['id']}.json"
                 if metadata_path.exists():
                     with open(metadata_path, 'r', encoding='utf-8') as f:
                         chunk_info = json.load(f)
                         chunk_data["content"] = chunk_info.get("text", chunk_data["content"])
-                
                 results.append({
                     "doc_id": doc_id,
                     "chunk_id": chunk_data["id"],
                     "content": chunk_data["content"],
                     "metadata": chunk_metadata,
-                    "score": float(1 - dist)  # 转换为相似度分数
+                    "score": float(1 - dist)
                 })
-                
                 if len(results) >= top_k:
                     break
-            
+            # 跨意图回退：主意图无结果或最高分偏低时，用全库再搜一次（如问薪资识别到HR但答案在财务文档）
+            if intent_space_id is not None and (not results or results[0]["score"] < self.FALLBACK_SCORE_THRESHOLD):
+                fallback = self.search(query, None, top_k)
+                if fallback and (not results or fallback[0]["score"] > results[0]["score"]):
+                    return fallback
             return results
         except Exception as e:
-            print(f"FAISS搜索失败: {e}，回退到简单搜索")
+            logger.warning("FAISS搜索失败 %s，回退到简单搜索", e)
             return self._simple_search(query, intent_space_id, top_k)
     
     def _simple_search(self, query: str, intent_space_id: Optional[int], top_k: int) -> List[Dict]:
@@ -331,10 +344,9 @@ class KnowledgeBase:
         try:
             return await self._generate_ai_response_async(query, search_results, frontend_type)
         except Exception:
-            import traceback
-            traceback.print_exc()
+            logger.exception("异步AI响应生成失败，回退到简单响应")
             return self._generate_simple_response(query, search_results, frontend_type)
-    
+
     def generate_response(self, query: str, search_results: List[Dict], 
                          frontend_type: str = "api") -> str:
         """
@@ -365,10 +377,9 @@ class KnowledgeBase:
         try:
             return self._generate_ai_response(query, search_results, frontend_type)
         except Exception:
-            import traceback
-            traceback.print_exc()
+            logger.exception("AI响应生成失败，回退到简单响应")
             return self._generate_simple_response(query, search_results, frontend_type)
-    
+
     async def _generate_ai_response_async(self, query: str, search_results: List[Dict], 
                                           frontend_type: str) -> str:
         """异步版本的AI响应生成（使用OpenRouter大模型）"""
